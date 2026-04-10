@@ -1,0 +1,844 @@
+<script>
+// ── Config ────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  status: {
+    committed: '#48C0D9',  // Vector Turquoise
+    planned:   '#FF9E00',  // Vector Tangerine
+    pipeline:  '#8A25C9',  // Vector Violet
+  },
+  capacity:  '#000000',    // Total capacity dashed line
+  surplus: {
+    pos: '#CFF933',        // Vector Lime  (positive)
+    neg: '#EB088A',        // Vector Magenta (negative / over-committed)
+  },
+  // Categorical palette — assigned to projects in order, stable across views
+  palette: [
+    '#48C0D9', '#FF9E00', '#8A25C9', '#EB088A', '#313CFF', '#84CC16',
+    '#06B6D4', '#D97706', '#7C3AED', '#DB2777', '#2563EB', '#16A34A',
+    '#0891B2', '#B45309', '#6D28D9', '#BE185D', '#1D4ED8', '#15803D',
+  ],
+  tooltips: {
+    totalCapacity: 'Sum of Weekly FTE Capacity for all active team members.',
+    committed:     'Average weekly FTE allocated to Committed projects over the selected period.',
+    firmSurplus:   'Total Capacity minus Committed FTE. Treats Planned work as free capacity.',
+    netSurplus:    'Total Capacity minus both Committed and Planned FTE. Conservative view of available capacity.',
+  },
+  labels: {
+    firmSurplus: 'Available Capacity',
+    netSurplus:  'Available if Plan Holds',
+  },
+};
+
+const DATE_TICK_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  month: 'short',
+  day: 'numeric',
+});
+
+const DATE_TABLE_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+});
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let rawData       = null;   // { meta, people[], projects[], assignments[], summary[] }
+let activeView    = 'project';
+let activeFY      = null;
+let activeStart   = null;   // yyyy-MM-dd — start of selected period
+let activeEnd     = null;   // yyyy-MM-dd — end of selected period
+let projectColors = {};     // project name → color, stable across all views
+let chart         = null;
+let chartResizeObserver = null;
+let chartResizeFrame = null;
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  fetchData();
+
+  const chartWrapper = document.getElementById('chart-wrapper');
+  if (window.ResizeObserver && chartWrapper) {
+    chartResizeObserver = new ResizeObserver(() => {
+      queueChartResize();
+    });
+    chartResizeObserver.observe(chartWrapper);
+  }
+
+  document.addEventListener('click', event => {
+    if (!event.target.closest('.metric-help')) {
+      closeAllMetricHelp();
+    }
+  });
+
+  document.addEventListener('focusin', event => {
+    if (!event.target.closest('.metric-help')) {
+      closeAllMetricHelp();
+    }
+  });
+
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      closeAllMetricHelp();
+    }
+  });
+
+  document.getElementById('refresh-btn')
+    .addEventListener('click', fetchData);
+
+  document.getElementById('fy-filter')
+    .addEventListener('change', e => {
+      activeFY = e.target.value;
+      setDefaultPeriod();
+      render();
+    });
+
+  document.getElementById('period-preset')
+    .addEventListener('change', e => applyPreset(e.target.value));
+
+  document.getElementById('range-start')
+    .addEventListener('change', e => {
+      activeStart = e.target.value;
+      if (activeEnd && activeEnd < activeStart) {
+        activeEnd = addDays(activeStart, 7);
+        document.getElementById('range-end').value = activeEnd;
+      }
+      render();
+    });
+
+  document.getElementById('range-end')
+    .addEventListener('change', e => {
+      activeEnd = e.target.value;
+      if (activeStart && activeEnd < activeStart) {
+        activeEnd = addDays(activeStart, 7);
+        document.getElementById('range-end').value = activeEnd;
+      }
+      render();
+    });
+
+  document.querySelectorAll('.view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeView = btn.dataset.view;
+      updateViewButtons();
+      render();
+    });
+  });
+});
+
+// ── Data Fetching ─────────────────────────────────────────────────────────────
+function fetchData() {
+  setLoadingState(true);
+  google.script.run
+    .withSuccessHandler(onDataLoaded)
+    .withFailureHandler(onDataError)
+    .getCapacityData();
+}
+
+function onDataLoaded(d) {
+  rawData = d;
+
+  // Assign a stable color to each project once, used consistently in all views
+  rawData.projects.forEach((p, i) => {
+    projectColors[p.name] = CONFIG.palette[i % CONFIG.palette.length];
+  });
+
+  setLoadingState(false);
+  updateViewButtons();
+  try {
+    populateFYFilter();
+  } catch (err) {
+    console.error('Dashboard render error:', err);
+    showError('Error rendering dashboard: ' + err.message);
+  }
+}
+
+function onDataError(err) {
+  console.error(err);
+  showError('Failed to load capacity data. Please try refreshing.');
+}
+
+function setLoadingState(loading) {
+  document.getElementById('loading').classList.toggle('hidden', !loading);
+  document.getElementById('dashboard').classList.toggle('hidden', loading);
+  document.getElementById('error').classList.add('hidden');
+  document.getElementById('main-content').setAttribute('aria-busy', String(loading));
+}
+
+function showError(message) {
+  document.getElementById('loading').classList.add('hidden');
+  document.getElementById('dashboard').classList.add('hidden');
+  document.getElementById('main-content').setAttribute('aria-busy', 'false');
+  const el = document.getElementById('error');
+  el.textContent = message;
+  el.classList.remove('hidden');
+  requestAnimationFrame(() => el.focus());
+}
+
+// ── FY + Period Controls ──────────────────────────────────────────────────────
+function populateFYFilter() {
+  const fySet = [...new Set(rawData.summary.map(r => r.fiscal_year))].sort();
+  const select = document.getElementById('fy-filter');
+  select.replaceChildren();
+
+  fySet.forEach(fy => {
+    const opt = document.createElement('option');
+    opt.value = fy;
+    opt.textContent = fy;  // textContent — safe
+    select.appendChild(opt);
+  });
+
+  // Default to the FY containing today
+  const today = new Date().toISOString().slice(0, 10);
+  let defaultFY = fySet[0] || null;
+  rawData.summary.forEach(r => { if (r.week <= today) defaultFY = r.fiscal_year; });
+  activeFY = defaultFY;
+  if (activeFY) select.value = activeFY;
+
+  setDefaultPeriod();
+}
+
+function setDefaultPeriod() {
+  document.getElementById('period-preset').value = 'quarter';
+  applyPreset('quarter');
+}
+
+function applyPreset(preset) {
+  const fyWeeks = rawData.summary
+    .filter(r => r.fiscal_year === activeFY)
+    .map(r => r.week);
+
+  if (!fyWeeks.length) return;
+
+  const customRange = document.getElementById('custom-range');
+
+  if (preset === 'custom') {
+    customRange.style.display = 'flex';
+    // Seed inputs with the current range (or full year if unset)
+    if (!activeStart || !activeEnd) {
+      activeStart = fyWeeks[0];
+      activeEnd   = fyWeeks[fyWeeks.length - 1];
+    }
+    document.getElementById('range-start').value = activeStart;
+    document.getElementById('range-end').value   = activeEnd;
+    render();
+    return;
+  }
+
+  customRange.style.display = 'none';
+
+  if      (preset === 'quarter')    [activeStart, activeEnd] = getCurrentQuarterBounds(fyWeeks);
+  else if (preset === '4weeks')     [activeStart, activeEnd] = getLastNWeeksBounds(fyWeeks, 4);
+  else if (preset === '8weeks')     [activeStart, activeEnd] = getLastNWeeksBounds(fyWeeks, 8);
+  else if (preset === 'next4weeks') [activeStart, activeEnd] = getNextNWeeksBounds(fyWeeks, 4);
+  else if (preset === 'next8weeks') [activeStart, activeEnd] = getNextNWeeksBounds(fyWeeks, 8);
+  else                              { activeStart = fyWeeks[0]; activeEnd = fyWeeks[fyWeeks.length - 1]; }
+
+  render();
+}
+
+function getCurrentQuarterBounds(fyWeeks) {
+  const today = new Date().toISOString().slice(0, 10);
+  const d = new Date(today + 'T12:00:00');
+  const m = d.getMonth() + 1;
+  const y = d.getFullYear();
+
+  // Fiscal year quarters: Q1 Apr–Jun, Q2 Jul–Sep, Q3 Oct–Dec, Q4 Jan–Mar
+  let qStart, qEnd;
+  if      (m >= 4  && m <= 6)  { qStart = `${y}-04-01`; qEnd = `${y}-06-30`; }
+  else if (m >= 7  && m <= 9)  { qStart = `${y}-07-01`; qEnd = `${y}-09-30`; }
+  else if (m >= 10 && m <= 12) { qStart = `${y}-10-01`; qEnd = `${y}-12-31`; }
+  else                          { qStart = `${y}-01-01`; qEnd = `${y}-03-31`; }
+
+  const inQ = fyWeeks.filter(w => w >= qStart && w <= qEnd);
+  return inQ.length ? [inQ[0], inQ[inQ.length - 1]] : [fyWeeks[0], fyWeeks[fyWeeks.length - 1]];
+}
+
+function getLastNWeeksBounds(fyWeeks, n) {
+  const today = new Date().toISOString().slice(0, 10);
+  const past  = fyWeeks.filter(w => w <= today);
+  const slice = (past.length ? past : fyWeeks).slice(-n);
+  return [slice[0], slice[slice.length - 1]];
+}
+
+function getNextNWeeksBounds(fyWeeks, n) {
+  const today   = new Date().toISOString().slice(0, 10);
+  const future  = fyWeeks.filter(w => w >= today);
+  const slice   = (future.length ? future : fyWeeks).slice(0, n);
+  return [slice[0], slice[slice.length - 1]];
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function render() {
+  if (!rawData || !activeFY || !activeStart || !activeEnd) return;
+
+  const fyRows    = rawData.summary.filter(r => r.fiscal_year === activeFY);
+  const rangeRows = fyRows.filter(r => r.week >= activeStart && r.week <= activeEnd);
+
+  if (!fyRows.length) return;
+
+  renderScorecards(rangeRows.length ? rangeRows : fyRows);
+
+  if      (activeView === 'project')    renderByProject(rangeRows);
+  else if (activeView === 'person')     renderByPerson(rangeRows);
+  else                                  renderByWorkstream(rangeRows);
+}
+
+// ── Scorecards ────────────────────────────────────────────────────────────────
+function renderScorecards(rows) {
+  const n    = rows.length || 1;
+  const avg  = key => round2(rows.reduce((s, r) => s + (r[key] || 0), 0) / n);
+
+  const totalCap   = avg('total_capacity');
+  const committed  = avg('committed');
+  const firmSurp   = avg('firm_surplus');
+  const netSurp    = avg('net_surplus');
+
+  const cards = [
+    {
+      label:   'Total Capacity',
+      value:   totalCap,
+      border:  '#E9E8E8',
+      tooltip: CONFIG.tooltips.totalCapacity,
+    },
+    {
+      label:   'Committed',
+      value:   committed,
+      border:  CONFIG.status.committed,
+      tooltip: CONFIG.tooltips.committed,
+    },
+    {
+      label:   CONFIG.labels.firmSurplus,
+      value:   firmSurp,
+      border:  firmSurp > 0 ? CONFIG.surplus.pos : CONFIG.surplus.neg,
+      tooltip: CONFIG.tooltips.firmSurplus,
+    },
+    {
+      label:   CONFIG.labels.netSurplus,
+      value:   netSurp,
+      border:  netSurp > 0 ? CONFIG.surplus.pos : CONFIG.surplus.neg,
+      tooltip: CONFIG.tooltips.netSurplus,
+    },
+  ];
+
+  const container = document.getElementById('scorecards');
+  container.replaceChildren();  // no innerHTML
+
+  cards.forEach(({ label, value, border, tooltip }, index) => {
+    const card = document.createElement('div');
+    card.className = 'bg-white rounded-2xl border-2 p-5 shadow-sm';
+    card.style.borderColor = border;
+
+    // Label + info icon row
+    const labelRow = document.createElement('div');
+    labelRow.className = 'flex items-center gap-1 mb-1';
+
+    const labelEl = document.createElement('p');
+    labelEl.className = 'metric-label text-xs font-semibold uppercase tracking-widest';
+    labelEl.textContent = label;  // textContent — safe
+
+    const infoWrap = document.createElement('div');
+    infoWrap.className = 'metric-help';
+    infoWrap.dataset.open = 'false';
+
+    const tipId = `metric-tip-${index}`;
+
+    const screenReaderTip = document.createElement('span');
+    screenReaderTip.id = tipId;
+    screenReaderTip.className = 'sr-only';
+    screenReaderTip.textContent = tooltip;
+
+    const infoButton = document.createElement('button');
+    infoButton.type = 'button';
+    infoButton.className = 'metric-help__toggle';
+    infoButton.setAttribute('aria-label', `More information about ${label}`);
+    infoButton.setAttribute('aria-describedby', tipId);
+    infoButton.setAttribute('aria-expanded', 'false');
+
+    const infoIcon = document.createElement('span');
+    infoIcon.setAttribute('aria-hidden', 'true');
+    infoIcon.textContent = 'ⓘ';  // textContent — safe
+    infoButton.appendChild(infoIcon);
+
+    infoButton.addEventListener('click', event => {
+      event.stopPropagation();
+      const willOpen = infoWrap.dataset.open !== 'true';
+      closeAllMetricHelp();
+      infoWrap.dataset.open = String(willOpen);
+      infoButton.setAttribute('aria-expanded', String(willOpen));
+    });
+
+    const tipEl = document.createElement('div');
+    tipEl.className = 'metric-help__bubble';
+    tipEl.setAttribute('aria-hidden', 'true');
+    tipEl.textContent = tooltip;  // textContent — safe
+
+    infoWrap.append(screenReaderTip, infoButton, tipEl);
+    labelRow.append(labelEl, infoWrap);
+
+    const valueEl = document.createElement('p');
+    valueEl.className = 'text-3xl font-heading font-bold mt-1';
+    valueEl.textContent = value.toFixed(2) + ' FTE';  // textContent — safe
+
+    const subEl = document.createElement('p');
+    subEl.className = 'metric-subtext text-xs mt-1';
+    subEl.textContent = 'avg / week · selected period';
+
+    card.append(labelRow, valueEl, subEl);
+    container.appendChild(card);
+  });
+}
+
+// ── By Project ────────────────────────────────────────────────────────────────
+// Uses pre-aggregated summary data — three clear stacks: Committed / Planned / Pipeline.
+// This directly answers the capacity signal question without per-project color ambiguity.
+function renderByProject(rangeRows) {
+  setText('chart-title', 'Weekly FTE by Status');
+  setText('table-title', 'Projects');
+
+  const weeks    = rangeRows.map(r => r.week);
+  const datasets = [
+    {
+      label:           'Committed',
+      data:            rangeRows.map(r => r.committed),
+      backgroundColor: CONFIG.status.committed,
+      stack:           'alloc',
+    },
+    {
+      label:           'Planned',
+      data:            rangeRows.map(r => r.planned),
+      backgroundColor: CONFIG.status.planned,
+      stack:           'alloc',
+    },
+    {
+      label:           'Pipeline',
+      data:            rangeRows.map(r => r.pipeline),
+      backgroundColor: CONFIG.status.pipeline,
+      stack:           'alloc',
+    },
+  ];
+
+  addCapacityLine(datasets, rangeRows);
+  renderChart(weeks, datasets, false);
+  renderProjectTable();
+}
+
+// ── By Person ─────────────────────────────────────────────────────────────────
+// Horizontal stacked bar: one bar per person, stacked by project.
+// Values = average weekly FTE over the selected period, not a timeseries.
+function renderByPerson(rangeRows) {
+  setText('chart-title', 'Avg Weekly FTE by Person (selected period)');
+  setText('table-title', 'Team Members');
+
+  const weeks      = rangeRows.map(r => r.week);
+  const periodLen  = weeks.length || 1;
+  const people     = rawData.people.map(p => p.name);
+
+  // For each person + project, compute average weekly FTE over the period:
+  // totalFTEWeeks (sum of FTE for each overlapping week) / periodLen
+  const personProject = {};
+  people.forEach(n => { personProject[n] = {}; });
+
+  rawData.assignments.forEach(a => {
+    if (!personProject[a.person]) return;
+    const overlap = weeks.filter(w => w >= a.start && w <= a.end).length;
+    if (!overlap) return;
+    const avg = round2((a.fte * overlap) / periodLen);
+    personProject[a.person][a.project] = round2((personProject[a.person][a.project] || 0) + avg);
+  });
+
+  // Only include projects that have at least some allocation in this period
+  const activeProjects = rawData.projects
+    .filter(p => people.some(n => (personProject[n][p.name] || 0) > 0));
+
+  const datasets = activeProjects.map(p => ({
+    label:           p.name,
+    data:            people.map(n => personProject[n][p.name] || 0),
+    backgroundColor: projectColors[p.name],
+    stack:           'alloc',
+  }));
+
+  renderChart(people, datasets, true);  // true = horizontal
+  renderPeopleTable(personProject);
+}
+
+// ── By Workstream ─────────────────────────────────────────────────────────────
+function renderByWorkstream(rangeRows) {
+  setText('chart-title', 'Weekly FTE by Workstream');
+  setText('table-title', 'Workstreams');
+
+  const weeks = rangeRows.map(r => r.week);
+
+  const projWS = {};
+  rawData.projects.forEach(p => { if (p.workstream) projWS[p.name] = p.workstream; });
+
+  // filter(Boolean) removes any projects with empty workstream
+  const workstreams = [...new Set(rawData.projects.map(p => p.workstream).filter(Boolean))].sort();
+  const fteGrid     = buildFTEGrid(weeks, rawData.assignments, a => projWS[a.project] || null);
+
+  const datasets = workstreams.map((ws, i) => ({
+    label:           ws,
+    data:            weeks.map(w => round2(fteGrid[w]?.[ws] || 0)),
+    backgroundColor: CONFIG.palette[i % CONFIG.palette.length],
+    stack:           'alloc',
+  }));
+
+  addCapacityLine(datasets, rangeRows);
+  renderChart(weeks, datasets, false);
+  renderWorkstreamTable(weeks, fteGrid, workstreams);
+}
+
+// ── Chart ─────────────────────────────────────────────────────────────────────
+function renderChart(labels, datasets, horizontal) {
+  if (chart) { chart.destroy(); chart = null; }
+
+  // Size the wrapper div — Chart.js fills it via responsive:true/maintainAspectRatio:false.
+  // Setting height on the canvas directly causes an infinite resize loop with responsive mode.
+  const wrapper = document.getElementById('chart-wrapper');
+  if (horizontal) {
+    const rowHeight = 36;   // px per person bar
+    const legendPad = 120;  // px for legend + x-axis title
+    wrapper.style.height = (labels.length * rowHeight + legendPad) + 'px';
+  } else {
+    wrapper.style.height = '380px';
+  }
+
+  const xScale = {
+    stacked: true,
+    grid:    horizontal ? {} : { display: false },
+    ticks:   { font: { family: 'Open Sans', size: 11 } },
+  };
+  if (horizontal) {
+    xScale.title = { display: true, text: 'FTE', font: { family: 'Inter', size: 12 } };
+  } else {
+    xScale.ticks.maxTicksLimit = 13;
+    xScale.ticks.callback = function(_, i) {
+      return formatChartLabel(labels[i]);
+    };
+  }
+
+  const yScale = {
+    stacked: true,
+    ticks:   { font: { family: 'Open Sans', size: 11 } },
+  };
+  if (!horizontal) {
+    yScale.title = { display: true, text: 'FTE', font: { family: 'Inter', size: 12 } };
+  }
+
+  chart = new Chart(document.getElementById('capacity-chart'), {
+    type: 'bar',
+    data: { labels, datasets },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      indexAxis:           horizontal ? 'y' : 'x',
+      resizeDelay:         100,
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: {
+            font:          { family: 'Open Sans', size: 12 },
+            padding:       16,
+            usePointStyle: true,
+          },
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const v = horizontal ? ctx.parsed.x : ctx.parsed.y;
+              return ' ' + ctx.dataset.label + ': ' + v.toFixed(2) + ' FTE';
+            },
+          },
+        },
+      },
+      scales: { x: xScale, y: yScale },
+    },
+  });
+
+  queueChartResize();
+  renderAccessibleChartData(labels, datasets, horizontal);
+}
+
+function addCapacityLine(datasets, rows) {
+  const totalCapacity = rows[0]?.total_capacity || 0;
+  datasets.push({
+    type:        'line',
+    label:       'Total Capacity',
+    data:        rows.map(() => totalCapacity),
+    borderColor: CONFIG.capacity,
+    borderWidth: 2,
+    borderDash:  [6, 4],
+    pointRadius: 0,
+    fill:        false,
+    order:       -1,
+  });
+}
+
+// ── Tables ────────────────────────────────────────────────────────────────────
+function renderProjectTable() {
+  const statusColors = {
+    'Committed': { bg: '#E0F9F4', fg: '#0E7864' },
+    'Planned':   { bg: '#FFF8E1', fg: '#B45309' },
+    'Pipeline':  { bg: '#EDE7F6', fg: '#5B21B6' },
+  };
+
+  const statusOrder = { 'Committed': 0, 'Planned': 1, 'Pipeline': 2 };
+  const sorted = [...rawData.projects]
+    .filter(p => p.name)
+    .sort((a, b) => (statusOrder[a.status] ?? 3) - (statusOrder[b.status] ?? 3));
+
+  const rows = sorted.map(p => [
+    textNode(p.name, 'font-medium'),
+    textNode(p.workstream || '—'),
+    badge(p.status, statusColors[p.status] || { bg: '#F5F5F5', fg: '#616161' }),
+    textNode(p.individually_funded),
+    textNode(p.fte_budget != null ? Number(p.fte_budget).toFixed(2) + ' FTE' : '—'),
+  ]);
+
+  renderTable(['Project', 'Workstream', 'Status', 'Individually Funded', 'FTE Budget'], rows);
+}
+
+function renderPeopleTable(personProject) {
+  const capMap = {};
+  rawData.people.forEach(p => { capMap[p.name] = p.fte_capacity; });
+
+  const rows = rawData.people.map(p => {
+    const total    = round2(Object.values(personProject[p.name] || {}).reduce((s, v) => s + v, 0));
+    const capacity = capMap[p.name] || 1;
+    const pct      = capacity > 0 ? total / capacity : 0;
+    const color    = pct > 1   ? '#EB088A'
+                   : pct > 0.8 ? '#FF9E00'
+                   :              '#48C0D9';
+    return [
+      textNode(p.name, 'font-medium'),
+      textNode(p.role, 'text-gray-500 text-sm'),
+      progressBar(total, capacity, color),
+    ];
+  });
+
+  renderTable(['Name', 'Role', 'Avg Weekly FTE (period)'], rows);
+}
+
+function renderWorkstreamTable(weeks, fteGrid, workstreams) {
+  const periodLen = weeks.length || 1;
+
+  const projCount = {};
+  rawData.projects.filter(p => p.workstream).forEach(p => {
+    projCount[p.workstream] = (projCount[p.workstream] || 0) + 1;
+  });
+
+  const rows = workstreams.map(ws => {
+    const total  = weeks.reduce((s, w) => s + (fteGrid[w]?.[ws] || 0), 0);
+    const avgFTE = round2(total / periodLen);
+    return [
+      textNode(ws, 'font-medium'),
+      textNode(String(projCount[ws] || 0)),
+      textNode(avgFTE.toFixed(2) + ' FTE'),
+    ];
+  });
+
+  renderTable(['Workstream', 'Projects', 'Avg Weekly FTE (period)'], rows);
+}
+
+// ── Table Builder ─────────────────────────────────────────────────────────────
+function renderTable(headers, rows) {
+  const table = document.createElement('table');
+  table.className = 'w-full text-sm';
+
+  const caption = document.createElement('caption');
+  caption.className = 'sr-only';
+  caption.textContent = document.getElementById('table-title').textContent || 'Data table';
+  table.appendChild(caption);
+
+  const thead = table.createTHead();
+  const hr    = thead.insertRow();
+  headers.forEach(h => {
+    const th = document.createElement('th');
+    th.scope = 'col';
+    th.className = 'table-header text-left py-2 px-3 text-xs font-semibold uppercase tracking-wider border-b border-gray-100';
+    th.textContent = h;  // textContent — safe
+    hr.appendChild(th);
+  });
+
+  const tbody = table.createTBody();
+  rows.forEach(cells => {
+    const tr = document.createElement('tr');
+    tr.className = 'border-b border-gray-50 hover:bg-gray-50 transition-colors';
+    cells.forEach((cell, index) => {
+      const cellEl = document.createElement(index === 0 ? 'th' : 'td');
+      cellEl.className = 'py-3 px-3 text-left';
+      if (index === 0) {
+        cellEl.scope = 'row';
+      }
+      cellEl.appendChild(cell);  // always a DOM node — no innerHTML risk
+      tr.appendChild(cellEl);
+    });
+    tbody.appendChild(tr);
+  });
+
+  document.getElementById('table-container').replaceChildren(table);  // no innerHTML
+}
+
+// ── Cell / Node Builders ──────────────────────────────────────────────────────
+function textNode(value, extraClass) {
+  const span = document.createElement('span');
+  if (extraClass) span.className = extraClass;
+  span.textContent = value ?? '—';  // textContent — safe
+  return span;
+}
+
+function badge(text, { bg, fg }) {
+  const el = document.createElement('span');
+  el.className = 'inline-block px-2 py-0.5 rounded-full text-xs font-semibold';
+  el.style.backgroundColor = bg;
+  el.style.color            = fg;
+  el.textContent = text;  // textContent — safe
+  return el;
+}
+
+function progressBar(allocated, capacity, barColor) {
+  const wrap = document.createElement('div');
+  wrap.className = 'flex items-center gap-2';
+
+  const track = document.createElement('div');
+  track.className = 'flex-1 bg-gray-100 rounded-full h-1.5 overflow-hidden';
+
+  const fill = document.createElement('div');
+  fill.className         = 'h-1.5 rounded-full progress-bar__fill';
+  fill.style.width       = Math.min(allocated / capacity, 1) * 100 + '%';
+  fill.style.backgroundColor = barColor;
+  track.appendChild(fill);
+
+  const label = document.createElement('span');
+  label.className   = 'text-xs text-gray-500 w-16 text-right tabular-nums';
+  label.textContent = allocated.toFixed(2) + ' / ' + capacity.toFixed(2);  // textContent — safe
+
+  wrap.append(track, label);
+  return wrap;
+}
+
+// ── Computation ───────────────────────────────────────────────────────────────
+/**
+ * Builds a { week → { groupKey → totalFTE } } grid from raw assignments.
+ * keyFn returns the group key (project, person, workstream) or null to skip.
+ */
+function buildFTEGrid(weeks, assignments, keyFn) {
+  const grid = {};
+  weeks.forEach(w => { grid[w] = {}; });
+
+  assignments.forEach(a => {
+    const key = keyFn(a);
+    if (!key) return;  // skip assignments with no valid grouping key
+    weeks.forEach(w => {
+      if (w >= a.start && w <= a.end) {
+        grid[w][key] = round2((grid[w][key] || 0) + a.fte);
+      }
+    });
+  });
+
+  return grid;
+}
+
+// ── DOM Utilities ─────────────────────────────────────────────────────────────
+function setText(id, text) {
+  document.getElementById(id).textContent = text;  // textContent — safe
+}
+
+function updateViewButtons() {
+  document.querySelectorAll('.view-btn').forEach(btn => {
+    const active = btn.dataset.view === activeView;
+    btn.style.backgroundColor = active ? '#EB088A' : '';
+    btn.style.color            = active ? '#ffffff' : '';
+    btn.style.fontWeight       = active ? '600'     : '';
+    btn.setAttribute('aria-pressed', String(active));
+  });
+}
+
+function closeAllMetricHelp() {
+  document.querySelectorAll('.metric-help').forEach(wrap => {
+    wrap.dataset.open = 'false';
+    const toggle = wrap.querySelector('.metric-help__toggle');
+    if (toggle) toggle.setAttribute('aria-expanded', 'false');
+  });
+}
+
+function queueChartResize() {
+  if (!chart) return;
+  if (chartResizeFrame) {
+    cancelAnimationFrame(chartResizeFrame);
+  }
+  chartResizeFrame = requestAnimationFrame(() => {
+    chartResizeFrame = null;
+    if (chart) chart.resize();
+  });
+}
+
+function renderAccessibleChartData(labels, datasets, horizontal) {
+  const container = document.getElementById('chart-accessible-data');
+  const status = document.getElementById('chart-status');
+  const title = document.getElementById('chart-title').textContent || 'Capacity chart';
+  const dataSetsForTable = datasets.filter(dataset => Array.isArray(dataset.data));
+
+  container.replaceChildren();
+
+  const summary = document.createElement('p');
+  summary.textContent = `${title}. ${labels.length} ${horizontal ? 'team members' : 'time periods'} shown. Values are listed in FTE.`;
+  container.appendChild(summary);
+
+  const table = document.createElement('table');
+
+  const caption = document.createElement('caption');
+  caption.textContent = `${title} data`;
+  table.appendChild(caption);
+
+  const thead = table.createTHead();
+  const headerRow = thead.insertRow();
+
+  const firstHeader = document.createElement('th');
+  firstHeader.scope = 'col';
+  firstHeader.textContent = horizontal ? 'Person' : 'Period';
+  headerRow.appendChild(firstHeader);
+
+  dataSetsForTable.forEach(dataset => {
+    const th = document.createElement('th');
+    th.scope = 'col';
+    th.textContent = dataset.label;
+    headerRow.appendChild(th);
+  });
+
+  const tbody = table.createTBody();
+  labels.forEach((label, rowIndex) => {
+    const tr = document.createElement('tr');
+
+    const rowHeader = document.createElement('th');
+    rowHeader.scope = 'row';
+    rowHeader.textContent = horizontal ? label : formatChartLabel(label, true);
+    tr.appendChild(rowHeader);
+
+    dataSetsForTable.forEach(dataset => {
+      const td = document.createElement('td');
+      const value = Number(dataset.data[rowIndex] ?? 0);
+      td.textContent = value.toFixed(2);
+      tr.appendChild(td);
+    });
+
+    tbody.appendChild(tr);
+  });
+
+  container.appendChild(table);
+  status.textContent = `${title} updated with ${labels.length} ${horizontal ? 'team members' : 'time periods'}.`;
+}
+
+function formatChartLabel(label, verbose) {
+  const date = new Date(label + 'T12:00:00');
+  if (Number.isNaN(date.getTime())) return label;
+  return verbose ? DATE_TABLE_FORMATTER.format(date) : DATE_TICK_FORMATTER.format(date);
+}
+
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+function addDays(dateStr, days) {
+  const d = new Date(dateStr + 'T12:00:00');
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+</script>

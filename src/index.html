@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <!--
+    Google Fonts: Inter (headings, replaces licensed Karbon) + Open Sans (body).
+    Note: Google Fonts logs request IPs — acceptable for an internal tool.
+  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;700&family=Open+Sans:wght@400;600&display=swap"
+    rel="stylesheet">
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"
+    integrity="sha384-NrKB+u6Ts6AtkIhwPixiKTzgSKNblyhlk0Sohlgar9UHUBzai/sgnNNWWd291xqt"
+    crossorigin="anonymous"></script>
+
+  <style>
+    <?!= include('styles') ?>
+
+    body {
+      font-family: 'Open Sans', sans-serif;
+      background-color: #f9fafb;
+    }
+
+    h1,
+    h2,
+    h3,
+    h4 {
+      font-family: 'Inter', sans-serif;
+    }
+
+    .gradient-bg {
+      background: linear-gradient(135deg, #EB088A 0%, #313CFF 100%);
+    }
+
+    :root {
+      color-scheme: light;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .controls-bar {
+      align-items: flex-end;
+    }
+
+    .control-field,
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      min-width: 11rem;
+    }
+
+    .control-group {
+      margin: 0;
+      padding: 0;
+      border: 0;
+    }
+
+    .date-range-fields {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      gap: 0.5rem;
+    }
+
+    .date-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      min-width: 9rem;
+    }
+
+    .control-label {
+      font-size: 0.75rem;
+      line-height: 1rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #6b7280;
+    }
+
+    .control-sublabel {
+      font-size: 0.75rem;
+      line-height: 1rem;
+      font-weight: 600;
+      color: #4b5563;
+    }
+
+    .control-field--action {
+      margin-left: auto;
+      min-width: auto;
+    }
+
+    #custom-range {
+      flex: 1 1 100%;
+      padding: 0.9rem 1rem 1rem;
+      border: 1px solid #e5e7eb;
+      border-radius: 0.9rem;
+      background-color: #ffffff;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    }
+
+    .scorecards-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .metric-label,
+    .metric-subtext,
+    .table-header {
+      color: #6b7280;
+    }
+
+    .metric-help {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .metric-help__toggle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.25rem;
+      height: 1.25rem;
+      padding: 0;
+      border: 1px solid #d1d5db;
+      border-radius: 9999px;
+      background-color: #ffffff;
+      color: #4b5563;
+      line-height: 1;
+    }
+
+    .metric-help__toggle:hover {
+      background-color: #f9fafb;
+      color: #111827;
+    }
+
+    .metric-help__bubble {
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 0.5rem);
+      width: 14rem;
+      padding: 0.625rem 0.75rem;
+      border-radius: 0.75rem;
+      background-color: #1f2937;
+      color: #ffffff;
+      font-size: 0.75rem;
+      line-height: 1.4;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+      transform: translateX(-50%);
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+      transition: opacity 0.15s ease, visibility 0.15s ease;
+      z-index: 10;
+    }
+
+    .metric-help:hover .metric-help__bubble,
+    .metric-help:focus-within .metric-help__bubble,
+    .metric-help[data-open="true"] .metric-help__bubble {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .progress-bar__fill {
+      transition: width 0.15s ease, background-color 0.15s ease;
+    }
+
+    button:focus-visible,
+    select:focus-visible,
+    input:focus-visible {
+      outline: 2px solid #EB088A;
+      outline-offset: 2px;
+    }
+
+    .chart-shell {
+      position: relative;
+      width: 100%;
+      height: 380px;
+      min-height: 380px;
+      overflow: hidden;
+    }
+
+    .chart-shell canvas {
+      width: 100% !important;
+      height: 100% !important;
+    }
+
+    #refresh-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      touch-action: manipulation;
+    }
+
+    .view-btn {
+      touch-action: manipulation;
+    }
+
+    @media (min-width: 640px) {
+      .scorecards-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (min-width: 1024px) {
+      .scorecards-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 639px) {
+      .control-field,
+      .control-group,
+      .control-field--action,
+      .view-toggle-field {
+        width: 100%;
+        min-width: 0;
+      }
+
+      .control-field--action {
+        margin-left: 0;
+      }
+
+      .view-toggle-group {
+        width: 100%;
+      }
+
+      #custom-range {
+        padding: 0.85rem;
+      }
+
+      .view-btn,
+      #refresh-btn {
+        flex: 1 1 0;
+      }
+    }
+  </style>
+</head>
+
+<body class="text-gray-900 min-h-screen">
+
+  <!-- ── Header ─────────────────────────────────────────────────────────────── -->
+  <header class="gradient-bg text-white">
+    <div class="max-w-7xl mx-auto px-6 py-8">
+      <p class="text-xs font-semibold uppercase tracking-widest opacity-70 mb-2">
+        Vector Institute · AI Engineering
+      </p>
+      <h1 class="text-3xl font-heading font-bold">Team Capacity</h1>
+    </div>
+  </header>
+
+  <!-- ── Main ───────────────────────────────────────────────────────────────── -->
+  <main id="main-content" class="max-w-7xl mx-auto px-6 py-8 space-y-6" aria-busy="true">
+
+    <!-- Loading state -->
+    <div id="loading"
+         class="flex items-center justify-center py-24 text-gray-500 text-lg"
+         role="status"
+         aria-live="polite"
+         aria-atomic="true">
+      Loading capacity data…
+    </div>
+
+    <!-- Error state (hidden by default) -->
+    <div id="error"
+         class="hidden bg-red-50 border border-red-200 rounded-xl p-5 text-red-700 text-sm"
+         role="alert"
+         aria-live="assertive"
+         aria-atomic="true"
+         tabindex="-1">
+    </div>
+
+    <!-- Dashboard (hidden until data loads) -->
+    <div id="dashboard" class="hidden space-y-6">
+
+      <!-- Scorecards -->
+      <section id="scorecards" class="grid scorecards-grid gap-4">
+      </section>
+
+      <!-- Controls bar -->
+      <div class="flex flex-wrap items-center gap-3">
+
+        <!-- Fiscal year -->
+        <label for="fy-filter" class="sr-only">Fiscal Year</label>
+        <select id="fy-filter"
+                name="fiscal-year"
+                autocomplete="off"
+                class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-v-magenta">
+        </select>
+
+        <!-- Period preset -->
+        <label for="period-preset" class="sr-only">Period</label>
+        <select id="period-preset"
+                name="period-preset"
+                autocomplete="off"
+                class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-v-magenta">
+          <option value="quarter">Current Quarter</option>
+          <option value="4weeks">Last 4 Weeks</option>
+          <option value="8weeks">Last 8 Weeks</option>
+          <option value="next4weeks">Next 4 Weeks</option>
+          <option value="next8weeks">Next 8 Weeks</option>
+          <option value="fullyear">Full Year</option>
+          <option value="custom">Custom Range</option>
+        </select>
+
+        <!-- Custom date range (shown only when "Custom Range" is selected) -->
+        <div id="custom-range" style="display:none;" class="flex items-center gap-2">
+          <label for="range-start" class="sr-only">Start date</label>
+          <input type="date" id="range-start" name="range-start" autocomplete="off"
+                 class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-v-magenta">
+          <span aria-hidden="true" class="text-gray-400 text-sm">→</span>
+          <label for="range-end" class="sr-only">End date</label>
+          <input type="date" id="range-end" name="range-end" autocomplete="off"
+                 class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-v-magenta">
+        </div>
+
+        <!-- View toggle -->
+        <span id="view-toggle-label" class="sr-only">View</span>
+        <div class="flex rounded-lg border border-gray-200 shadow-sm overflow-hidden text-sm"
+             role="group"
+             aria-labelledby="view-toggle-label">
+          <button type="button" data-view="project"
+                  class="view-btn px-4 py-2 bg-white hover:bg-gray-50 transition-colors">
+            By Project
+          </button>
+          <button type="button" data-view="person"
+                  class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
+            By Person
+          </button>
+          <button type="button" data-view="workstream"
+                  class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
+            By Workstream
+          </button>
+        </div>
+
+        <!-- Refresh -->
+        <button type="button" id="refresh-btn"
+                class="ml-auto text-sm px-4 py-2 rounded-lg border border-gray-200 bg-white shadow-sm hover:bg-gray-50 transition-colors">
+          <span aria-hidden="true">↻</span> Refresh
+        </button>
+
+      </div>
+
+      <!-- Chart card -->
+      <section class="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+        <h2 id="chart-title" class="font-heading font-semibold text-lg mb-5 text-gray-800"></h2>
+        <div id="chart-wrapper" class="chart-shell">
+          <canvas id="capacity-chart"
+                  role="img"
+                  aria-labelledby="chart-title"
+                  aria-describedby="chart-status chart-accessible-data">
+            Capacity chart.
+          </canvas>
+        </div>
+        <p id="chart-status" class="sr-only" aria-live="polite" aria-atomic="true"></p>
+        <div id="chart-accessible-data" class="sr-only"></div>
+      </section>
+
+      <!-- Table card -->
+      <section class="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+        <h2 id="table-title" class="font-heading font-semibold text-lg mb-5 text-gray-800"></h2>
+        <div id="table-container" class="overflow-x-auto"></div>
+      </section>
+
+    </div><!-- /dashboard -->
+  </main>
+
+  <!-- Client-side JS (inlined at serve time by Apps Script) -->
+  <?!= include('client') ?>
+
+</body>
+
+</html>
