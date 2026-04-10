@@ -3,6 +3,11 @@ name: Deploy to Apps Script
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - 'README.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.github/**'
 
 jobs:
   deploy:
