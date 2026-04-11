@@ -29,6 +29,7 @@ const STATUS_COLORS = {
   'Committed': '#c6efce', // green
   'Planned':   '#ffeb9c', // yellow
   'Pipeline':  '#dce6f1', // blue-grey
+  'Completed': '#efefef', // light grey
 };
 
 
@@ -247,7 +248,7 @@ function _buildProjectsSheet(ss) {
   s.getRange(2, 1, rows.length, 5).setValues(rows);
   s.getRange(2, 5, rows.length, 1).setNumberFormat('0.0');
 
-  _addDropdown(s, 2, 3, rows.length + 50, ['Committed', 'Planned', 'Pipeline']);
+  _addDropdown(s, 2, 3, rows.length + 50, ['Committed', 'Planned', 'Pipeline', 'Completed']);
   _addDropdown(s, 2, 4, rows.length + 50, ['Yes', 'No']);
 
   rows.forEach((row, i) => {
@@ -257,7 +258,8 @@ function _buildProjectsSheet(ss) {
   s.getRange('C1').setNote(
     'Committed  — contracted or actively staffed\n' +
     'Planned    — confirmed internally, not yet started\n' +
-    'Pipeline   — proposed or potential, not committed'
+    'Pipeline   — proposed or potential, not committed\n' +
+    'Completed  — work finished; hidden in dashboard by default'
   );
   s.autoResizeColumns(1, 5);
 }
@@ -402,6 +404,7 @@ function expandAssignments() {
       if      (status === 'committed') weekMap[key].committed += fteVal;
       else if (status === 'planned')   weekMap[key].planned   += fteVal;
       else if (status === 'pipeline')  weekMap[key].pipeline  += fteVal;
+      else if (status === 'completed') weekMap[key].committed += fteVal; // historical — counts as committed
     });
   });
 
