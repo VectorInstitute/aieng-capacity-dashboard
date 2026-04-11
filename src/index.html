@@ -226,29 +226,47 @@
     }
 
     @media (max-width: 639px) {
-      .control-field,
-      .control-group,
-      .control-field--action,
-      .view-toggle-field {
-        width: 100%;
-        min-width: 0;
+      /* Tighter page gutters — reclaims ~16px of content width on each side */
+      #main-content {
+        padding-left: 1rem;
+        padding-right: 1rem;
       }
 
-      .control-field--action {
-        margin-left: 0;
-      }
-
+      /* View toggle groups: span full row width; overflow scrolls if needed */
       .view-toggle-group {
         width: 100%;
+        overflow-x: auto;
+        overflow-y: hidden;
+        /* Prevent rubberbanding that causes the page to scroll instead of the group */
+        -webkit-overflow-scrolling: touch;
+      }
+      /* Compact button text so all labels fit on narrow screens (~320px+) */
+      .view-toggle-group .view-btn {
+        font-size: 0.75rem;
+        padding-left: 0.5rem;
+        padding-right: 0.5rem;
+        white-space: nowrap;
       }
 
+      /* Completed toggle + Refresh: drop the auto-margin, fill the full row */
+      #controls-end {
+        margin-left: 0;
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      /* Custom date range: stack the two date inputs vertically */
       #custom-range {
+        flex-direction: column;
+        align-items: stretch;
         padding: 0.85rem;
       }
-
-      .view-btn,
-      #refresh-btn {
-        flex: 1 1 0;
+      /* Hide the inline " → " arrow between date inputs when stacked */
+      #custom-range span[aria-hidden="true"] {
+        display: none;
+      }
+      #custom-range input[type="date"] {
+        width: 100%;
       }
     }
   </style>
@@ -332,29 +350,69 @@
         </div>
 
         <!-- View toggle -->
-        <span id="view-toggle-label" class="sr-only">View</span>
-        <div class="flex rounded-lg border border-gray-200 shadow-sm overflow-hidden text-sm"
+        <span id="view-toggle-label" class="sr-only">Chart view</span>
+        <div class="view-toggle-group flex rounded-lg border border-gray-200 shadow-sm overflow-hidden text-sm"
              role="group"
              aria-labelledby="view-toggle-label">
-          <button type="button" data-view="project"
+          <button type="button" data-view="trends"
                   class="view-btn px-4 py-2 bg-white hover:bg-gray-50 transition-colors">
-            By Project
+            Overview
           </button>
           <button type="button" data-view="person"
                   class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
             By Person
           </button>
+          <button type="button" data-view="project"
+                  class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
+            By Project
+          </button>
           <button type="button" data-view="workstream"
                   class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
-            By Workstream
+            Workstreams
           </button>
         </div>
 
-        <!-- Refresh -->
-        <button type="button" id="refresh-btn"
-                class="ml-auto text-sm px-4 py-2 rounded-lg border border-gray-200 bg-white shadow-sm hover:bg-gray-50 transition-colors">
-          <span aria-hidden="true">↻</span> Refresh
+        <!-- Breakdown disclosure toggle -->
+        <button type="button" id="analysis-toggle"
+                aria-expanded="false"
+                aria-controls="analysis-group"
+                class="flex items-center gap-2 text-sm px-4 py-2 rounded-lg border border-gray-200 bg-white shadow-sm hover:bg-gray-50 transition-colors text-gray-600">
+          Breakdown
+          <span id="analysis-chevron" aria-hidden="true" class="text-gray-400" style="font-size:0.7em;line-height:1;transition:transform 0.15s ease;display:inline-block">▼</span>
         </button>
+
+        <!-- Breakdown view toggle (hidden until expanded) -->
+        <div id="analysis-group"
+             class="view-toggle-group flex rounded-lg border border-gray-200 shadow-sm overflow-hidden text-sm"
+             role="group"
+             aria-label="Breakdown charts"
+             style="display:none">
+          <button type="button" data-view="budget"
+                  class="view-btn px-4 py-2 bg-white hover:bg-gray-50 transition-colors">
+            Budget
+          </button>
+          <button type="button" data-view="roles"
+                  class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
+            By Role
+          </button>
+          <button type="button" data-view="timeline"
+                  class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
+            Timeline
+          </button>
+        </div>
+
+        <!-- Completed toggle + Refresh (right-aligned group) -->
+        <div id="controls-end" class="ml-auto flex items-center gap-3">
+          <label class="flex items-center gap-3 text-sm text-gray-500 cursor-pointer select-none">
+            <input type="checkbox" id="show-completed"
+                   class="rounded border-gray-300 text-v-magenta focus:ring-v-magenta">
+            Show completed
+          </label>
+          <button type="button" id="refresh-btn"
+                  class="text-sm px-4 py-2 rounded-lg border border-gray-200 bg-white shadow-sm hover:bg-gray-50 transition-colors">
+            <span aria-hidden="true">↻</span> Refresh
+          </button>
+        </div>
 
       </div>
 
