@@ -5,6 +5,7 @@ const CONFIG = {
     committed: '#48C0D9',  // Vector Turquoise
     planned:   '#FF9E00',  // Vector Tangerine
     pipeline:  '#8A25C9',  // Vector Violet
+    completed: '#9ca3af',  // Muted grey
   },
   capacity:  '#000000',    // Total capacity dashed line
   surplus: {
@@ -42,14 +43,27 @@ const DATE_TABLE_FORMATTER = new Intl.DateTimeFormat(undefined, {
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let rawData       = null;   // { meta, people[], projects[], assignments[], summary[] }
-let activeView    = 'project';
+let activeView    = 'trends';
 let activeFY      = null;
 let activeStart   = null;   // yyyy-MM-dd — start of selected period
 let activeEnd     = null;   // yyyy-MM-dd — end of selected period
+let showCompleted = false;  // when true, Completed projects appear in project-level views
 let projectColors = {};     // project name → color, stable across all views
 let chart         = null;
 let chartResizeObserver = null;
 let chartResizeFrame = null;
+
+// Returns rawData.projects filtered by the current showCompleted toggle.
+// All chart/table functions that operate at the project level use this.
+function getVisibleProjects() {
+  return rawData.projects.filter(p => showCompleted || p.status !== 'Completed');
+}
+
+// Returns rawData.assignments for only the currently visible projects.
+function getVisibleAssignments() {
+  const vis = new Set(getVisibleProjects().map(p => p.name));
+  return rawData.assignments.filter(a => vis.has(a.project));
+}
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -83,6 +97,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('refresh-btn')
     .addEventListener('click', fetchData);
+
+  document.getElementById('show-completed')
+    .addEventListener('change', e => {
+      showCompleted = e.target.checked;
+      render();
+    });
+
+  document.getElementById('analysis-toggle')
+    .addEventListener('click', () => {
+      const btn      = document.getElementById('analysis-toggle');
+      const group    = document.getElementById('analysis-group');
+      const chevron  = document.getElementById('analysis-chevron');
+      const expanded = btn.getAttribute('aria-expanded') === 'true';
+      const opening  = !expanded;
+
+      group.style.display = opening ? '' : 'none';
+      btn.setAttribute('aria-expanded', String(opening));
+      chevron.style.transform = opening ? 'rotate(-180deg)' : '';
+
+      // Collapsing while an analysis view is active → fall back to Overview
+      if (!opening && ['budget', 'roles', 'timeline'].includes(activeView)) {
+        activeView = 'trends';
+        updateViewButtons();
+        render();
+      }
+    });
 
   document.getElementById('fy-filter')
     .addEventListener('change', e => {
@@ -278,7 +318,11 @@ function render() {
 
   if      (activeView === 'project')    renderByProject(rangeRows);
   else if (activeView === 'person')     renderByPerson(rangeRows);
-  else                                  renderByWorkstream(rangeRows);
+  else if (activeView === 'workstream') renderWorkstreamShare(rangeRows);
+  else if (activeView === 'budget')     renderBudget(rangeRows);
+  else if (activeView === 'roles')      renderByRole(rangeRows);
+  else if (activeView === 'timeline')   renderTimeline();
+  else                                  renderTrends(rangeRows);
 }
 
 // ── Scorecards ────────────────────────────────────────────────────────────────
@@ -422,21 +466,23 @@ function renderByProject(rangeRows) {
 
 // ── By Person ─────────────────────────────────────────────────────────────────
 // Horizontal stacked bar: one bar per person, stacked by project.
-// Values = average weekly FTE over the selected period, not a timeseries.
+// Values = utilization (avg weekly FTE / person capacity) so part-time staff
+// are comparable to full-time — 1.0 means fully allocated for that person.
 function renderByPerson(rangeRows) {
-  setText('chart-title', 'Avg Weekly FTE by Person (selected period)');
+  setText('chart-title', 'Capacity Utilization by Person (selected period)');
   setText('table-title', 'Team Members');
 
-  const weeks      = rangeRows.map(r => r.week);
-  const periodLen  = weeks.length || 1;
-  const people     = rawData.people.map(p => p.name);
+  const weeks     = rangeRows.map(r => r.week);
+  const periodLen = weeks.length || 1;
+  const people    = rawData.people.map(p => p.name);
+  const capMap    = {};
+  rawData.people.forEach(p => { capMap[p.name] = p.fte_capacity || 1; });
 
-  // For each person + project, compute average weekly FTE over the period:
-  // totalFTEWeeks (sum of FTE for each overlapping week) / periodLen
+  // For each person + project, compute average weekly FTE over the period
   const personProject = {};
   people.forEach(n => { personProject[n] = {}; });
 
-  rawData.assignments.forEach(a => {
+  getVisibleAssignments().forEach(a => {
     if (!personProject[a.person]) return;
     const overlap = weeks.filter(w => w >= a.start && w <= a.end).length;
     if (!overlap) return;
@@ -444,45 +490,754 @@ function renderByPerson(rangeRows) {
     personProject[a.person][a.project] = round2((personProject[a.person][a.project] || 0) + avg);
   });
 
-  // Only include projects that have at least some allocation in this period
-  const activeProjects = rawData.projects
-    .filter(p => people.some(n => (personProject[n][p.name] || 0) > 0));
+  // Sort people by total utilization descending — most allocated first, most available last
+  const sortedPeople = [...people].sort((a, b) => {
+    const utilA = Object.values(personProject[a]).reduce((s, v) => s + v, 0) / (capMap[a] || 1);
+    const utilB = Object.values(personProject[b]).reduce((s, v) => s + v, 0) / (capMap[b] || 1);
+    return utilB - utilA;
+  });
 
+  // Only include projects that have at least some allocation in this period
+  const activeProjects = getVisibleProjects()
+    .filter(p => sortedPeople.some(n => (personProject[n][p.name] || 0) > 0));
+
+  // Normalize each value by the person's capacity so 1.0 = fully allocated
   const datasets = activeProjects.map(p => ({
     label:           p.name,
-    data:            people.map(n => personProject[n][p.name] || 0),
+    data:            sortedPeople.map(n => round2((personProject[n][p.name] || 0) / (capMap[n] || 1))),
+    rawFTE:          sortedPeople.map(n => personProject[n][p.name] || 0),
     backgroundColor: projectColors[p.name],
     stack:           'alloc',
   }));
 
-  renderChart(people, datasets, true);  // true = horizontal
+  renderPersonChart(sortedPeople, datasets, capMap);
   renderPeopleTable(personProject);
 }
 
-// ── By Workstream ─────────────────────────────────────────────────────────────
-function renderByWorkstream(rangeRows) {
-  setText('chart-title', 'Weekly FTE by Workstream');
-  setText('table-title', 'Workstreams');
+
+// ── Trends ────────────────────────────────────────────────────────────────────
+
+// Vertical gradient: green (low utilisation) → yellow (~80%) → red (~100%+).
+// Positions are fractions 0=bottom (y:0) → 1=top (y:yMax) of the chart area.
+function buildUtilGradient(canvasCtx, chartArea, yMax) {
+  const grad = canvasCtx.createLinearGradient(0, chartArea.bottom, 0, chartArea.top);
+  const s = v => Math.max(0, Math.min(1, v / yMax));
+  grad.addColorStop(0,      'rgba( 34, 197,  94, 0.05)'); // green – near zero
+  grad.addColorStop(s(0.6), 'rgba( 34, 197,  94, 0.22)'); // green – comfortable
+  grad.addColorStop(s(0.8), 'rgba(234, 179,   8, 0.38)'); // amber – approaching limit
+  grad.addColorStop(s(1.0), 'rgba(239,  68,  68, 0.55)'); // red   – at capacity
+  if (yMax > 1.0) {
+    grad.addColorStop(1.0,  'rgba(239,  68,  68, 0.70)'); // deeper red if over capacity
+  }
+  return grad;
+}
+
+function renderTrends(rangeRows) {
+  setText('chart-title', 'Capacity Utilization over Time');
+  setText('table-title', 'Weekly Summary');
 
   const weeks = rangeRows.map(r => r.week);
+  const pct   = (val, cap) => cap > 0 ? round2(val / cap) : 0;
 
-  const projWS = {};
-  rawData.projects.forEach(p => { if (p.workstream) projWS[p.name] = p.workstream; });
+  const datasets = [
+    {
+      label:       'Total Capacity',
+      data:        rangeRows.map(() => 1),
+      borderColor: CONFIG.capacity,
+      borderWidth: 2,
+      borderDash:  [6, 4],
+      pointRadius: 0,
+      fill:        false,
+      tension:     0,
+    },
+    {
+      label:           'Committed',
+      data:            rangeRows.map(r => pct(r.committed, r.total_capacity)),
+      rawFTE:          rangeRows.map(r => r.committed),
+      borderColor:     CONFIG.status.committed,
+      borderWidth:     2,
+      pointRadius:     0,
+      fill:            'origin',
+      backgroundColor: ctx => {
+        const { ctx: c, chartArea, scales } = ctx.chart;
+        if (!chartArea) return 'rgba(34,197,94,0.15)';
+        return buildUtilGradient(c, chartArea, scales.y?.max || 1.5);
+      },
+      tension:         0,
+    },
+    {
+      label:       'Committed + Planned',
+      data:        rangeRows.map(r => pct(r.committed + r.planned, r.total_capacity)),
+      rawFTE:      rangeRows.map(r => r.committed + r.planned),
+      borderColor: CONFIG.status.planned,
+      borderWidth: 2,
+      borderDash:  [3, 3],
+      pointRadius: 0,
+      fill:        false,
+      tension:     0,
+    },
+  ];
 
-  // filter(Boolean) removes any projects with empty workstream
-  const workstreams = [...new Set(rawData.projects.map(p => p.workstream).filter(Boolean))].sort();
-  const fteGrid     = buildFTEGrid(weeks, rawData.assignments, a => projWS[a.project] || null);
+  renderLineChart(weeks, datasets);
+  renderTrendsTable(rangeRows);
+}
 
-  const datasets = workstreams.map((ws, i) => ({
-    label:           ws,
-    data:            weeks.map(w => round2(fteGrid[w]?.[ws] || 0)),
-    backgroundColor: CONFIG.palette[i % CONFIG.palette.length],
-    stack:           'alloc',
+function renderTrendsTable(rangeRows) {
+  const pct = (val, cap) => cap > 0 ? (val / cap * 100).toFixed(0) + '%' : '—';
+
+  const rows = rangeRows.map(r => [
+    textNode(formatChartLabel(r.week, true)),
+    textNode(r.total_capacity.toFixed(2) + ' FTE'),
+    textNode(r.committed.toFixed(2)   + ' FTE  (' + pct(r.committed,   r.total_capacity) + ')'),
+    textNode(r.firm_surplus.toFixed(2) + ' FTE  (' + pct(r.firm_surplus, r.total_capacity) + ')'),
+    textNode(r.net_surplus.toFixed(2)  + ' FTE  (' + pct(r.net_surplus,  r.total_capacity) + ')'),
+  ]);
+
+  renderTable(
+    ['Week', 'Total Capacity', 'Committed', CONFIG.labels.firmSurplus, CONFIG.labels.netSurplus],
+    rows
+  );
+}
+
+// ── Shared bullet/battery plugin ──────────────────────────────────────────────
+// Draws a light gray "capacity shell" behind each bar before Chart.js renders
+// the coloured assigned/allocated bar on top. Overflow past the shell is natural.
+// Usage: add CAPACITY_CAP_PLUGIN to the chart plugins array and pass cap values
+// via options.plugins.capacityCap.caps = [number, ...].
+const CAPACITY_CAP_PLUGIN = {
+  id: 'capacityCap',
+  beforeDatasetsDraw(chart) {
+    const caps = chart.options.plugins?.capacityCap?.caps;
+    if (!caps?.length) return;
+    const { ctx, scales } = chart;
+    const meta = chart.getDatasetMeta(0);
+    if (!meta?.data?.length) return;
+    const x0 = scales.x.getPixelForValue(0);
+    ctx.save();
+    meta.data.forEach((bar, i) => {
+      const cap = caps[i];
+      if (!cap) return;
+      const xC = scales.x.getPixelForValue(cap);
+      ctx.fillStyle   = 'rgba(229,231,235,0.7)';
+      ctx.fillRect(x0, bar.y - bar.height / 2, xC - x0, bar.height);
+      ctx.strokeStyle = '#d1d5db';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(x0, bar.y - bar.height / 2, xC - x0, bar.height);
+    });
+    ctx.restore();
+  },
+};
+
+// ── Budget vs Assigned ────────────────────────────────────────────────────────
+function renderBudget(rangeRows) {
+  setText('chart-title', 'FTE Budget vs Assigned (avg / week)');
+  setText('table-title', 'Budget vs Assigned');
+
+  const weeks     = rangeRows.map(r => r.week);
+  const periodLen = weeks.length || 1;
+
+  const assigned = {};
+  getVisibleAssignments().forEach(a => {
+    const overlap = weeks.filter(w => w >= a.start && w <= a.end).length;
+    if (!overlap) return;
+    assigned[a.project] = round2((assigned[a.project] || 0) + a.fte * overlap / periodLen);
+  });
+
+  const statusOrder  = { Committed: 0, Planned: 1, Pipeline: 2, Completed: 3 };
+  const statusColors = {
+    Committed: CONFIG.status.committed,
+    Planned:   CONFIG.status.planned,
+    Pipeline:  CONFIG.status.pipeline,
+    Completed: CONFIG.status.completed,
+  };
+
+  const projects  = [...getVisibleProjects()]
+    .filter(p => p.fte_budget != null || assigned[p.name])
+    .sort((a, b) => (statusOrder[a.status] ?? 3) - (statusOrder[b.status] ?? 3));
+
+  const labels     = projects.map(p => p.name);
+  const budgetData = projects.map(p => round2(p.fte_budget || 0));
+  const assignData = projects.map(p => round2(assigned[p.name] || 0));
+  const barColors  = projects.map(p => statusColors[p.status] || '#9ca3af');
+  const xMax       = round2(Math.max(...budgetData, ...assignData, 0.1) * 1.12);
+
+  const wrapper = document.getElementById('chart-wrapper');
+  wrapper.style.height = (projects.length * 48 + 140) + 'px';
+
+  if (chart) { chart.destroy(); chart = null; }
+
+  chart = new Chart(document.getElementById('capacity-chart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label:           'Avg Assigned',
+        data:            assignData,
+        backgroundColor: barColors,
+        borderRadius:    3,
+        borderSkipped:   false,
+      }],
+    },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      indexAxis:           'y',
+      resizeDelay:         100,
+      plugins: {
+        legend: {
+          display:  true,
+          position: 'bottom',
+          labels: {
+            generateLabels: () => {
+              const items = [
+                { text: 'Committed', fillStyle: CONFIG.status.committed, strokeStyle: 'transparent', lineWidth: 0, hidden: false },
+                { text: 'Planned',   fillStyle: CONFIG.status.planned,   strokeStyle: 'transparent', lineWidth: 0, hidden: false },
+                { text: 'Pipeline',  fillStyle: CONFIG.status.pipeline,  strokeStyle: 'transparent', lineWidth: 0, hidden: false },
+              ];
+              if (showCompleted) items.push(
+                { text: 'Completed', fillStyle: CONFIG.status.completed, strokeStyle: 'transparent', lineWidth: 0, hidden: false }
+              );
+              return items;
+            },
+            font:          { family: 'Open Sans', size: 12 },
+            padding:       16,
+            usePointStyle: true,
+          },
+        },
+        capacityCap:   { caps: budgetData },
+        tooltip: {
+          callbacks: {
+            title: items => items[0].label + ' (' + (projects[items[0].dataIndex]?.status || '') + ')',
+            label: ctx  => {
+              const i = ctx.dataIndex;
+              return [
+                ' Assigned: ' + assignData[i].toFixed(2) + ' FTE',
+                ' Budget:   ' + budgetData[i].toFixed(2) + ' FTE',
+              ];
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          beginAtZero: true,
+          max:   xMax,
+          title: { display: true, text: 'FTE', font: { family: 'Inter', size: 12 } },
+          ticks: { font: { family: 'Open Sans', size: 11 } },
+        },
+        y: {
+          ticks: {
+            font: { family: 'Open Sans', size: 13 },
+            callback: function(val) {
+              const label = this.getLabelForValue(val);
+              return typeof label === 'string' && label.length > 22
+                ? label.slice(0, 21) + '…'
+                : label;
+            },
+          },
+        },
+      },
+    },
+    plugins: [CAPACITY_CAP_PLUGIN],
+  });
+
+  queueChartResize();
+  renderAccessibleChartData(labels,
+    [{ label: 'Budget', data: budgetData }, { label: 'Assigned', data: assignData }],
+    true);
+  renderBudgetTable(projects, assigned);
+}
+
+function renderBudgetTable(projects, assigned) {
+  const statusColors = {
+    Committed: { bg: '#E0F9F4', fg: '#0E7864' },
+    Planned:   { bg: '#FFF8E1', fg: '#B45309' },
+    Pipeline:  { bg: '#EDE7F6', fg: '#5B21B6' },
+    Completed: { bg: '#F3F4F6', fg: '#6B7280' },
+  };
+
+  const rows = projects.map(p => {
+    const a    = round2(assigned[p.name] || 0);
+    const b    = round2(p.fte_budget     || 0);
+    const diff = round2(a - b);
+    const diffEl = document.createElement('span');
+    diffEl.style.fontWeight = '600';
+    diffEl.style.color = diff > 0.05 ? '#EB088A' : diff < -0.05 ? '#48C0D9' : '#6b7280';
+    diffEl.textContent = (diff >= 0 ? '+' : '') + diff.toFixed(2) + ' FTE';
+    return [
+      textNode(p.name, 'font-medium'),
+      textNode(p.workstream || '—'),
+      badge(p.status, statusColors[p.status] || { bg: '#F5F5F5', fg: '#616161' }),
+      textNode(b > 0 ? b.toFixed(2) + ' FTE' : '—'),
+      textNode(a.toFixed(2) + ' FTE'),
+      diffEl,
+    ];
+  });
+
+  renderTable(['Project', 'Workstream', 'Status', 'Budget', 'Assigned', 'Δ'], rows);
+}
+
+// ── By Role ───────────────────────────────────────────────────────────────────
+
+// Normalise role labels:
+//   1. Replace "Applied Machine Learning" with "ML" anywhere in the string.
+//   2. Strip any specialization suffix after a dash/en-dash/em-dash, e.g.:
+//        "ML Scientist – Agents and Reasoning"    → "ML Scientist"
+//        "Senior Software Developer – Machine Learning" → "Senior Software Developer"
+// Seniority prefixes (Senior, Associate) are intentionally preserved.
+function normalizeRole(role) {
+  return role
+    .replace(/Applied\s+Machine\s+Learning/gi, 'ML')
+    .replace(/\s+[-\u2013\u2014]\s+.+$/u, '')   // strip " – <any specialization>"
+    .trim();
+}
+
+function renderByRole(rangeRows) {
+  setText('chart-title', 'Capacity & Allocation by Role (avg / week)');
+  setText('table-title', 'Roles');
+
+  const weeks     = rangeRows.map(r => r.week);
+  const periodLen = weeks.length || 1;
+
+  // Aggregate by normalised role label
+  const roleCapacity = {};
+  const rolePeople   = {};
+  rawData.people.forEach(p => {
+    if (!p.role) return;
+    const r = normalizeRole(p.role);
+    roleCapacity[r] = round2((roleCapacity[r] || 0) + (p.fte_capacity || 0));
+    (rolePeople[r] = rolePeople[r] || []).push(p.name);
+  });
+
+  const personAssigned = {};
+  getVisibleAssignments().forEach(a => {
+    const overlap = weeks.filter(w => w >= a.start && w <= a.end).length;
+    if (!overlap) return;
+    personAssigned[a.person] = round2((personAssigned[a.person] || 0) + a.fte * overlap / periodLen);
+  });
+
+  const roleAssigned = {};
+  rawData.people.forEach(p => {
+    if (!p.role) return;
+    const r = normalizeRole(p.role);
+    roleAssigned[r] = round2((roleAssigned[r] || 0) + (personAssigned[p.name] || 0));
+  });
+
+  const roles   = Object.keys(roleCapacity).sort((a, b) => roleCapacity[b] - roleCapacity[a]);
+  const capData = roles.map(r => roleCapacity[r]);
+  const asgData = roles.map(r => round2(roleAssigned[r] || 0));
+  // Colour each bar by utilisation level
+  const barColors = roles.map((r, i) => {
+    const pct = capData[i] > 0 ? asgData[i] / capData[i] : 0;
+    return pct > 1 ? '#EB088A' : pct > 0.8 ? '#FF9E00' : '#48C0D9';
+  });
+  const xMax = round2(Math.max(...capData, ...asgData, 0.1) * 1.12);
+
+  const wrapper = document.getElementById('chart-wrapper');
+  wrapper.style.height = (roles.length * 48 + 140) + 'px';
+
+  if (chart) { chart.destroy(); chart = null; }
+
+  chart = new Chart(document.getElementById('capacity-chart'), {
+    type: 'bar',
+    data: {
+      labels: roles,
+      datasets: [{
+        label:           'Assigned',
+        data:            asgData,
+        backgroundColor: barColors,
+        borderRadius:    3,
+        borderSkipped:   false,
+      }],
+    },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      indexAxis:           'y',
+      resizeDelay:         100,
+      plugins: {
+        legend:       { display: false },
+        capacityCap:  { caps: capData },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const i   = ctx.dataIndex;
+              const pct = capData[i] > 0 ? (asgData[i] / capData[i] * 100).toFixed(0) + '%' : '—';
+              return [
+                ' Assigned: ' + asgData[i].toFixed(2) + ' FTE (' + pct + ')',
+                ' Capacity: ' + capData[i].toFixed(2) + ' FTE',
+              ];
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          beginAtZero: true,
+          max:   xMax,
+          title: { display: true, text: 'FTE', font: { family: 'Inter', size: 12 } },
+          ticks: { font: { family: 'Open Sans', size: 11 } },
+        },
+        y: {
+          ticks: { font: { family: 'Open Sans', size: 12 } },
+        },
+      },
+    },
+    plugins: [CAPACITY_CAP_PLUGIN],
+  });
+
+  queueChartResize();
+  renderAccessibleChartData(roles,
+    [{ label: 'Capacity', data: capData }, { label: 'Assigned', data: asgData }],
+    true);
+  renderRoleTable(roles, roleCapacity, roleAssigned, rolePeople);
+}
+
+function renderRoleTable(roles, roleCapacity, roleAssigned, rolePeople) {
+  const rows = roles.map(r => {
+    const cap   = roleCapacity[r] || 0;
+    const asgnd = round2(roleAssigned[r] || 0);
+    const pct   = cap > 0 ? asgnd / cap : 0;
+    const color = pct > 1 ? '#EB088A' : pct > 0.8 ? '#FF9E00' : '#48C0D9';
+    return [
+      textNode(r, 'font-medium'),
+      textNode(String((rolePeople[r] || []).length)),
+      textNode(cap.toFixed(2) + ' FTE'),
+      progressBar(asgnd, cap, color),
+    ];
+  });
+  renderTable(['Role', 'Headcount', 'Total Capacity', 'Avg Assigned (period)'], rows);
+}
+
+// ── Timeline (Gantt) ──────────────────────────────────────────────────────────
+// X axis zooms to the selected period; assignments are clipped to that range.
+function renderTimeline() {
+  if (!activeStart || !activeEnd) return;
+
+  const MS_WEEK = 7 * 864e5;
+  const minMs   = new Date(activeStart + 'T00:00:00').getTime();
+  const maxMs   = new Date(activeEnd   + 'T00:00:00').getTime() + MS_WEEK;
+
+  setText('chart-title', 'Assignment Timeline');
+  setText('table-title', '');
+
+  // Only people with at least one assignment (to a visible project) overlapping the period
+  const _visAsgn   = getVisibleAssignments();
+  const activePeople = rawData.people
+    .filter(p => _visAsgn.some(
+      a => a.person === p.name && a.end >= activeStart && a.start <= activeEnd))
+    .map(p => p.name);
+
+  // Build per-person FTE capacity and per-person+project average FTE for the period
+  const fyWeeks      = rawData.summary
+    .filter(r => r.fiscal_year === activeFY)
+    .map(r => r.week);
+  const periodWeeks  = fyWeeks.filter(w => w >= activeStart && w <= activeEnd);
+  const periodLen    = periodWeeks.length || 1;
+
+  const personCapacity = {};
+  rawData.people.forEach(p => { personCapacity[p.name] = p.fte_capacity || 1; });
+
+  const personProjectFTE = {};
+  _visAsgn.forEach(a => {
+    if (a.end < activeStart || a.start > activeEnd) return;
+    const overlap = periodWeeks.filter(w => w >= a.start && w <= a.end).length;
+    if (!overlap) return;
+    if (!personProjectFTE[a.person]) personProjectFTE[a.person] = {};
+    personProjectFTE[a.person][a.project] = round2(
+      (personProjectFTE[a.person][a.project] || 0) + a.fte * overlap / periodLen
+    );
+  });
+
+  // Merge multi-row assignments into a single span per person+project
+  const spans = {};
+  _visAsgn.forEach(a => {
+    if (a.end < activeStart || a.start > activeEnd) return;
+    if (!spans[a.person]) spans[a.person] = {};
+    const s = spans[a.person];
+    if (!s[a.project]) {
+      s[a.project] = { start: a.start, end: a.end };
+    } else {
+      if (a.start < s[a.project].start) s[a.project].start = a.start;
+      if (a.end   > s[a.project].end)   s[a.project].end   = a.end;
+    }
+  });
+
+  const activeProjects = getVisibleProjects().filter(p =>
+    activePeople.some(n => spans[n]?.[p.name])
+  );
+
+  const datasets = activeProjects.map(proj => ({
+    label:           proj.name,
+    data:            activePeople.map(n => {
+      const span = spans[n]?.[proj.name];
+      if (!span) return null;
+      return [
+        Math.max(new Date(span.start + 'T00:00:00').getTime(), minMs),
+        Math.min(new Date(span.end   + 'T00:00:00').getTime() + MS_WEEK, maxMs),
+      ];
+    }),
+    fteData:         activePeople.map(n => personProjectFTE[n]?.[proj.name] ?? null),
+    backgroundColor: projectColors[proj.name] + 'bb',
+    borderColor:     projectColors[proj.name],
+    borderWidth:     1,
+    borderRadius:    3,
+    borderSkipped:   false,
   }));
 
-  addCapacityLine(datasets, rangeRows);
-  renderChart(weeks, datasets, false);
-  renderWorkstreamTable(weeks, fteGrid, workstreams);
+  const rowHeight = Math.max(44, activeProjects.length * 18 + 8);
+  const wrapper   = document.getElementById('chart-wrapper');
+  wrapper.style.height = (activePeople.length * rowHeight + 160) + 'px';
+
+  if (chart) { chart.destroy(); chart = null; }
+
+  chart = new Chart(document.getElementById('capacity-chart'), {
+    type: 'bar',
+    data: { labels: activePeople, datasets },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      indexAxis:           'y',
+      resizeDelay:         100,
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { font: { family: 'Open Sans', size: 12 }, padding: 16, usePointStyle: true },
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              if (!Array.isArray(ctx.raw)) return null;
+              const [s, e] = ctx.raw;
+              const fte    = ctx.dataset.fteData?.[ctx.dataIndex];
+              const cap    = personCapacity[activePeople[ctx.dataIndex]] || 1;
+              const fteStr = fte != null
+                ? '  ' + fte.toFixed(2) + ' FTE (' + (fte / cap * 100).toFixed(0) + '% of capacity)'
+                : '';
+              return ' ' + ctx.dataset.label + ': '
+                + DATE_TABLE_FORMATTER.format(new Date(s)) + ' → '
+                + DATE_TABLE_FORMATTER.format(new Date(e - MS_WEEK))
+                + fteStr;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          type:  'linear',
+          min:   minMs,
+          max:   maxMs,
+          ticks: {
+            font:          { family: 'Open Sans', size: 11 },
+            maxTicksLimit: 8,
+            callback:      v => DATE_TICK_FORMATTER.format(new Date(v)),
+          },
+          grid: { display: false },
+        },
+        y: {
+          ticks: { font: { family: 'Open Sans', size: 13 } },
+        },
+      },
+    },
+  });
+
+  queueChartResize();
+
+  const accessContainer = document.getElementById('chart-accessible-data');
+  accessContainer.replaceChildren();
+  const ap = document.createElement('p');
+  ap.textContent = 'Assignment timeline for ' + activePeople.length + ' team members.';
+  accessContainer.appendChild(ap);
+  document.getElementById('chart-status').textContent =
+    'Assignment timeline updated for ' + activePeople.length + ' team members.';
+
+  // No table for Timeline
+  document.getElementById('table-container').replaceChildren();
+}
+
+// ── Workstream Share (Donut) ──────────────────────────────────────────────────
+function renderWorkstreamShare(rangeRows) {
+  setText('chart-title', 'Workstream Mix — Allocation Share (selected period)');
+  setText('table-title', 'Workstream Allocation');
+
+  const weeks     = rangeRows.map(r => r.week);
+  const periodLen = weeks.length || 1;
+
+  const projWS = {};
+  getVisibleProjects().forEach(p => { if (p.workstream) projWS[p.name] = p.workstream; });
+
+  const wsTotals = {};
+  getVisibleAssignments().forEach(a => {
+    const ws = projWS[a.project];
+    if (!ws) return;
+    const overlap = weeks.filter(w => w >= a.start && w <= a.end).length;
+    if (!overlap) return;
+    wsTotals[ws] = round2((wsTotals[ws] || 0) + a.fte * overlap / periodLen);
+  });
+
+  const workstreams = [...new Set(getVisibleProjects().map(p => p.workstream).filter(Boolean))].sort();
+  const data   = workstreams.map(ws => round2(wsTotals[ws] || 0));
+  const colors = workstreams.map((_, i) => CONFIG.palette[i % CONFIG.palette.length]);
+
+  renderDoughnutChart(workstreams, data, colors);
+  renderWorkstreamShareTable(workstreams, wsTotals);
+}
+
+function renderDoughnutChart(labels, data, colors) {
+  if (chart) { chart.destroy(); chart = null; }
+
+  const wrapper = document.getElementById('chart-wrapper');
+  wrapper.style.height = '380px';
+
+  const total = data.reduce((s, v) => s + v, 0);
+
+  chart = new Chart(document.getElementById('capacity-chart'), {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{
+        data,
+        backgroundColor: colors,
+        borderColor:     '#ffffff',
+        borderWidth:     2,
+        hoverOffset:     10,
+      }],
+    },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      resizeDelay:         100,
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { font: { family: 'Open Sans', size: 12 }, padding: 16, usePointStyle: true },
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const v   = ctx.parsed;
+              const pct = total > 0 ? (v / total * 100).toFixed(1) + '%' : '—';
+              return ' ' + ctx.label + ': ' + v.toFixed(2) + ' FTE (' + pct + ')';
+            },
+          },
+        },
+      },
+    },
+  });
+
+  queueChartResize();
+
+  // Custom accessible table for doughnut (no axis labels)
+  const container = document.getElementById('chart-accessible-data');
+  const statusEl  = document.getElementById('chart-status');
+  const title     = document.getElementById('chart-title').textContent;
+  container.replaceChildren();
+  const summary = document.createElement('p');
+  summary.textContent = title + '. ' + labels.length + ' workstreams shown.';
+  container.appendChild(summary);
+  const tbl  = document.createElement('table');
+  const cap  = document.createElement('caption');
+  cap.textContent = title + ' data';
+  tbl.appendChild(cap);
+  const thead = tbl.createTHead();
+  const hr    = thead.insertRow();
+  ['Workstream', 'Avg FTE / week', 'Share'].forEach(h => {
+    const th = document.createElement('th');
+    th.scope = 'col';
+    th.textContent = h;
+    hr.appendChild(th);
+  });
+  const tbody = tbl.createTBody();
+  labels.forEach((lbl, i) => {
+    const tr   = tbody.insertRow();
+    const thEl = document.createElement('th');
+    thEl.scope = 'row';
+    thEl.textContent = lbl;
+    tr.appendChild(thEl);
+    tr.insertCell().textContent = data[i].toFixed(2);
+    tr.insertCell().textContent = total > 0 ? (data[i] / total * 100).toFixed(1) + '%' : '—';
+  });
+  tbl.appendChild(tbody);
+  container.appendChild(tbl);
+  statusEl.textContent = title + ' updated.';
+}
+
+function renderWorkstreamShareTable(workstreams, wsTotals) {
+  const total = workstreams.reduce((s, ws) => s + (wsTotals[ws] || 0), 0);
+
+  const projCount = {};
+  getVisibleProjects().filter(p => p.workstream).forEach(p => {
+    projCount[p.workstream] = (projCount[p.workstream] || 0) + 1;
+  });
+
+  const rows = workstreams.map(ws => {
+    const fte = round2(wsTotals[ws] || 0);
+    return [
+      textNode(ws, 'font-medium'),
+      textNode(String(projCount[ws] || 0)),
+      textNode(fte.toFixed(2) + ' FTE'),
+      textNode(total > 0 ? (fte / total * 100).toFixed(1) + '%' : '—'),
+    ];
+  });
+  renderTable(['Workstream', 'Projects', 'Avg Weekly FTE', 'Share'], rows);
+}
+
+function renderPersonChart(people, datasets, capMap) {
+  if (chart) { chart.destroy(); chart = null; }
+
+  const wrapper = document.getElementById('chart-wrapper');
+  const rowHeight = 36;
+  const legendPad = 120;
+  wrapper.style.height = (people.length * rowHeight + legendPad) + 'px';
+
+  const maxUtil = Math.max(1.1, ...datasets.flatMap(d => d.data));
+
+  chart = new Chart(document.getElementById('capacity-chart'), {
+    type: 'bar',
+    data: { labels: people, datasets },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      resizeDelay:         100,
+      indexAxis:           'y',
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { font: { family: 'Open Sans', size: 12 }, padding: 16, usePointStyle: true },
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const raw = ctx.dataset.rawFTE?.[ctx.dataIndex] ?? ctx.parsed.x;
+              return ' ' + ctx.dataset.label + ': ' + raw.toFixed(2) + ' FTE'
+                   + ' (' + (ctx.parsed.x * 100).toFixed(0) + '%)';
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          stacked: true,
+          min:     0,
+          max:     round2(maxUtil),
+          title:   { display: true, text: 'Fraction of capacity', font: { family: 'Inter', size: 12 } },
+          ticks:   { font: { family: 'Open Sans', size: 11 } },
+          // Highlight the 1.0 ceiling in magenta, all other grid lines in default grey
+          grid: {
+            color: ctx => ctx.tick.value === 1 ? '#EB088A' : '#e5e7eb',
+            lineWidth: ctx => ctx.tick.value === 1 ? 2 : 1,
+          },
+        },
+        y: {
+          stacked: true,
+          ticks:   { font: { family: 'Open Sans', size: 13 } },
+        },
+      },
+    },
+  });
+
+  queueChartResize();
+  renderAccessibleChartData(people, datasets, true);
 }
 
 // ── Chart ─────────────────────────────────────────────────────────────────────
@@ -556,6 +1311,63 @@ function renderChart(labels, datasets, horizontal) {
   renderAccessibleChartData(labels, datasets, horizontal);
 }
 
+function renderLineChart(labels, datasets) {
+  if (chart) { chart.destroy(); chart = null; }
+
+  const wrapper = document.getElementById('chart-wrapper');
+  wrapper.style.height = '380px';
+
+  chart = new Chart(document.getElementById('capacity-chart'), {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive:          true,
+      maintainAspectRatio: false,
+      resizeDelay:         100,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          position: 'bottom',
+          labels: { font: { family: 'Open Sans', size: 12 }, padding: 16, usePointStyle: true },
+        },
+        tooltip: {
+          callbacks: {
+            title: items => formatChartLabel(labels[items[0].dataIndex], true),
+            label: ctx => {
+              const pctStr = (ctx.parsed.y * 100).toFixed(0) + '%';
+              const raw    = ctx.dataset.rawFTE?.[ctx.dataIndex];
+              return raw != null
+                ? ' ' + ctx.dataset.label + ': ' + pctStr + ' (' + raw.toFixed(2) + ' FTE)'
+                : ' ' + ctx.dataset.label + ': ' + pctStr;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: {
+            font: { family: 'Open Sans', size: 11 },
+            maxTicksLimit: 13,
+            callback: (_, i) => formatChartLabel(labels[i]),
+          },
+          grid: { display: false },
+        },
+        y: {
+          beginAtZero: true,
+          ticks: {
+            font:          { family: 'Open Sans', size: 11 },
+            maxTicksLimit: 8,
+          },
+          title: { display: true, text: 'Fraction of capacity', font: { family: 'Inter', size: 12 } },
+        },
+      },
+    },
+  });
+
+  queueChartResize();
+  renderAccessibleChartData(labels, datasets, false);
+}
+
 function addCapacityLine(datasets, rows) {
   const totalCapacity = rows[0]?.total_capacity || 0;
   datasets.push({
@@ -577,12 +1389,13 @@ function renderProjectTable() {
     'Committed': { bg: '#E0F9F4', fg: '#0E7864' },
     'Planned':   { bg: '#FFF8E1', fg: '#B45309' },
     'Pipeline':  { bg: '#EDE7F6', fg: '#5B21B6' },
+    'Completed': { bg: '#F3F4F6', fg: '#6B7280' },
   };
 
-  const statusOrder = { 'Committed': 0, 'Planned': 1, 'Pipeline': 2 };
-  const sorted = [...rawData.projects]
+  const statusOrder = { 'Committed': 0, 'Planned': 1, 'Pipeline': 2, 'Completed': 3 };
+  const sorted = [...getVisibleProjects()]
     .filter(p => p.name)
-    .sort((a, b) => (statusOrder[a.status] ?? 3) - (statusOrder[b.status] ?? 3));
+    .sort((a, b) => (statusOrder[a.status] ?? 4) - (statusOrder[b.status] ?? 4));
 
   const rows = sorted.map(p => [
     textNode(p.name, 'font-medium'),
@@ -616,26 +1429,6 @@ function renderPeopleTable(personProject) {
   renderTable(['Name', 'Role', 'Avg Weekly FTE (period)'], rows);
 }
 
-function renderWorkstreamTable(weeks, fteGrid, workstreams) {
-  const periodLen = weeks.length || 1;
-
-  const projCount = {};
-  rawData.projects.filter(p => p.workstream).forEach(p => {
-    projCount[p.workstream] = (projCount[p.workstream] || 0) + 1;
-  });
-
-  const rows = workstreams.map(ws => {
-    const total  = weeks.reduce((s, w) => s + (fteGrid[w]?.[ws] || 0), 0);
-    const avgFTE = round2(total / periodLen);
-    return [
-      textNode(ws, 'font-medium'),
-      textNode(String(projCount[ws] || 0)),
-      textNode(avgFTE.toFixed(2) + ' FTE'),
-    ];
-  });
-
-  renderTable(['Workstream', 'Projects', 'Avg Weekly FTE (period)'], rows);
-}
 
 // ── Table Builder ─────────────────────────────────────────────────────────────
 function renderTable(headers, rows) {
