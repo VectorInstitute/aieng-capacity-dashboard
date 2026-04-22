@@ -47,11 +47,20 @@ let activeView    = 'trends';
 let activeFY      = null;
 let activeStart   = null;   // yyyy-MM-dd — start of selected period
 let activeEnd     = null;   // yyyy-MM-dd — end of selected period
-let showCompleted = false;  // when true, Completed projects appear in project-level views
-let projectColors = {};     // project name → color, stable across all views
+let showCompleted   = false;  // when true, Completed projects appear in project-level views
+let projectColors   = {};     // project name → color, stable across all views
+let personColors    = {};     // person name → color, stable across all views
+let personCapMap    = {};     // person name → fte_capacity, built once on data load
+let selectedPeople        = [];   // array of selected person names; empty = nobody selected
+let cachedPeopleCheckboxes = [];  // kept in sync with the people-checkboxes container
 let chart         = null;
 let chartResizeObserver = null;
 let chartResizeFrame = null;
+
+const VIEW_CATEGORIES = {
+  breakdown: ['person', 'project', 'workstream', 'budget', 'roles'],
+  planning:  ['timeline', 'resource-planning'],
+};
 
 // Returns rawData.projects filtered by the current showCompleted toggle.
 // All chart/table functions that operate at the project level use this.
@@ -63,6 +72,33 @@ function getVisibleProjects() {
 function getVisibleAssignments() {
   const vis = new Set(getVisibleProjects().map(p => p.name));
   return rawData.assignments.filter(a => vis.has(a.project));
+}
+
+function openDisclosureGroup(toggleId, groupId, chevronId) {
+  document.getElementById(groupId).style.display = '';
+  document.getElementById(toggleId).setAttribute('aria-expanded', 'true');
+  document.getElementById(chevronId).style.transform = 'rotate(-180deg)';
+}
+
+function wireDisclosureToggle(toggleId, groupId, chevronId, childViews) {
+  document.getElementById(toggleId).addEventListener('click', () => {
+    const btn     = document.getElementById(toggleId);
+    const opening = btn.getAttribute('aria-expanded') !== 'true';
+
+    if (opening) {
+      openDisclosureGroup(toggleId, groupId, chevronId);
+    } else {
+      document.getElementById(groupId).style.display = 'none';
+      btn.setAttribute('aria-expanded', 'false');
+      document.getElementById(chevronId).style.transform = '';
+
+      if (childViews.includes(activeView)) {
+        activeView = 'trends';
+        updateViewButtons();
+        render();
+      }
+    }
+  });
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
@@ -104,25 +140,8 @@ document.addEventListener('DOMContentLoaded', () => {
       render();
     });
 
-  document.getElementById('analysis-toggle')
-    .addEventListener('click', () => {
-      const btn      = document.getElementById('analysis-toggle');
-      const group    = document.getElementById('analysis-group');
-      const chevron  = document.getElementById('analysis-chevron');
-      const expanded = btn.getAttribute('aria-expanded') === 'true';
-      const opening  = !expanded;
-
-      group.style.display = opening ? '' : 'none';
-      btn.setAttribute('aria-expanded', String(opening));
-      chevron.style.transform = opening ? 'rotate(-180deg)' : '';
-
-      // Collapsing while an analysis view is active → fall back to Overview
-      if (!opening && ['budget', 'roles', 'timeline'].includes(activeView)) {
-        activeView = 'trends';
-        updateViewButtons();
-        render();
-      }
-    });
+  wireDisclosureToggle('analysis-toggle', 'analysis-group', 'analysis-chevron', VIEW_CATEGORIES.breakdown);
+  wireDisclosureToggle('planning-toggle', 'planning-group', 'planning-chevron', VIEW_CATEGORIES.planning);
 
   document.getElementById('fy-filter')
     .addEventListener('change', e => {
@@ -161,6 +180,19 @@ document.addEventListener('DOMContentLoaded', () => {
       render();
     });
   });
+
+  document.getElementById('people-select-all').addEventListener('click',  () => setAllPeopleChecked(true));
+  document.getElementById('people-select-none').addEventListener('click', () => setAllPeopleChecked(false));
+  document.getElementById('people-filter-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    const panel = document.getElementById('people-filter-panel');
+    panel.style.display = panel.style.display === 'none' ? '' : 'none';
+  });
+  document.addEventListener('click', e => {
+    if (!document.getElementById('people-filter-wrapper').contains(e.target)) {
+      document.getElementById('people-filter-panel').style.display = 'none';
+    }
+  });
 });
 
 // ── Data Fetching ─────────────────────────────────────────────────────────────
@@ -175,11 +207,20 @@ function fetchData() {
 function onDataLoaded(d) {
   rawData = d;
 
-  // Assign a stable color to each project once, used consistently in all views
   rawData.projects.forEach((p, i) => {
     projectColors[p.name] = CONFIG.palette[i % CONFIG.palette.length];
   });
 
+  personColors = {};
+  personCapMap = {};
+  rawData.people.forEach((p, i) => {
+    personColors[p.name] = CONFIG.palette[i % CONFIG.palette.length];
+    personCapMap[p.name] = p.fte_capacity || 1;
+  });
+
+  selectedPeople = [];
+  buildPeopleFilter();
+  updatePeopleFilterLabel();
   setLoadingState(false);
   updateViewButtons();
   try {
@@ -316,13 +357,16 @@ function render() {
 
   renderScorecards(rangeRows.length ? rangeRows : fyRows);
 
-  if      (activeView === 'project')    renderByProject(rangeRows);
-  else if (activeView === 'person')     renderByPerson(rangeRows);
-  else if (activeView === 'workstream') renderWorkstreamShare(rangeRows);
-  else if (activeView === 'budget')     renderBudget(rangeRows);
-  else if (activeView === 'roles')      renderByRole(rangeRows);
-  else if (activeView === 'timeline')   renderTimeline();
-  else                                  renderTrends(rangeRows);
+  document.getElementById('capacity-chart').style.cursor = '';
+
+  if      (activeView === 'project')           renderByProject(rangeRows);
+  else if (activeView === 'person')            renderByPerson(rangeRows);
+  else if (activeView === 'workstream')        renderWorkstreamShare(rangeRows);
+  else if (activeView === 'budget')            renderBudget(rangeRows);
+  else if (activeView === 'roles')             renderByRole(rangeRows);
+  else if (activeView === 'timeline')          renderTimeline();
+  else if (activeView === 'resource-planning') renderResourcePlanning(rangeRows);
+  else                                         renderTrends(rangeRows);
 }
 
 // ── Scorecards ────────────────────────────────────────────────────────────────
@@ -475,8 +519,6 @@ function renderByPerson(rangeRows) {
   const weeks     = rangeRows.map(r => r.week);
   const periodLen = weeks.length || 1;
   const people    = rawData.people.map(p => p.name);
-  const capMap    = {};
-  rawData.people.forEach(p => { capMap[p.name] = p.fte_capacity || 1; });
 
   // For each person + project, compute average weekly FTE over the period
   const personProject = {};
@@ -492,8 +534,8 @@ function renderByPerson(rangeRows) {
 
   // Sort people by total utilization descending — most allocated first, most available last
   const sortedPeople = [...people].sort((a, b) => {
-    const utilA = Object.values(personProject[a]).reduce((s, v) => s + v, 0) / (capMap[a] || 1);
-    const utilB = Object.values(personProject[b]).reduce((s, v) => s + v, 0) / (capMap[b] || 1);
+    const utilA = Object.values(personProject[a]).reduce((s, v) => s + v, 0) / personCapMap[a];
+    const utilB = Object.values(personProject[b]).reduce((s, v) => s + v, 0) / personCapMap[b];
     return utilB - utilA;
   });
 
@@ -504,13 +546,13 @@ function renderByPerson(rangeRows) {
   // Normalize each value by the person's capacity so 1.0 = fully allocated
   const datasets = activeProjects.map(p => ({
     label:           p.name,
-    data:            sortedPeople.map(n => round2((personProject[n][p.name] || 0) / (capMap[n] || 1))),
+    data:            sortedPeople.map(n => round2((personProject[n][p.name] || 0) / personCapMap[n])),
     rawFTE:          sortedPeople.map(n => personProject[n][p.name] || 0),
     backgroundColor: projectColors[p.name],
     stack:           'alloc',
   }));
 
-  renderPersonChart(sortedPeople, datasets, capMap);
+  renderPersonChart(sortedPeople, datasets, personCapMap);
   renderPeopleTable(personProject);
 }
 
@@ -597,6 +639,65 @@ function renderTrendsTable(rangeRows) {
     ['Week', 'Total Capacity', 'Committed', CONFIG.labels.firmSurplus, CONFIG.labels.netSurplus],
     rows
   );
+}
+
+// ── Resource Planning ─────────────────────────────────────────────────────────
+// Shows available FTE per person per week (capacity minus assigned), so the PM
+// can see who has headroom and when — lines trending up = capacity opening up.
+function renderResourcePlanning(rangeRows) {
+  setText('chart-title', 'Available Capacity by Person Over Time');
+  setText('table-title', '');
+  document.getElementById('table-container').replaceChildren();
+
+  const wrapper = document.getElementById('chart-wrapper');
+  wrapper.style.height = '380px';
+
+  if (!selectedPeople.length) {
+    if (chart) { chart.destroy(); chart = null; }
+    document.getElementById('capacity-chart').style.display = 'none';
+    let hint = document.getElementById('rp-empty-hint');
+    if (!hint) {
+      hint = document.createElement('div');
+      hint.id = 'rp-empty-hint';
+      hint.style.cssText = 'height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:#6b7280';
+      const h = document.createElement('span');
+      h.style.cssText = 'font-size:1.1rem;font-weight:500';
+      h.textContent = 'Select people to compare';
+      const sub = document.createElement('span');
+      sub.style.cssText = 'font-size:0.875rem;text-align:center';
+      sub.textContent = "Use the People filter above, or click someone's bar in Breakdown \u2192 By Person";
+      hint.appendChild(h);
+      hint.appendChild(sub);
+      wrapper.appendChild(hint);
+    }
+    hint.style.display = '';
+    document.getElementById('chart-status').textContent = 'No people selected.';
+    return;
+  }
+
+  const hint = document.getElementById('rp-empty-hint');
+  if (hint) hint.style.display = 'none';
+  document.getElementById('capacity-chart').style.display = '';
+
+  const weeks = rangeRows.map(r => r.week);
+  const activePeople = rawData.people.filter(p => selectedPeople.includes(p.name));
+
+  const grid = buildFTEGrid(weeks, getVisibleAssignments(), a => a.person);
+
+  const datasets = activePeople.map(p => ({
+    label:       p.name,
+    data:        weeks.map(w => round2(Math.max(0, personCapMap[p.name] - (grid[w][p.name] || 0)))),
+    borderColor: personColors[p.name],
+    borderWidth: 2,
+    pointRadius: 2,
+    fill:        false,
+    tension:     0,
+  }));
+
+  renderLineChart(weeks, datasets, {
+    yAxisTitle:   'Available FTE',
+    tooltipLabel: ctx => ' ' + ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(2) + ' FTE available',
+  });
 }
 
 // ── Shared bullet/battery plugin ──────────────────────────────────────────────
@@ -935,8 +1036,6 @@ function renderTimeline() {
   const periodWeeks  = fyWeeks.filter(w => w >= activeStart && w <= activeEnd);
   const periodLen    = periodWeeks.length || 1;
 
-  const personCapacity = {};
-  rawData.people.forEach(p => { personCapacity[p.name] = p.fte_capacity || 1; });
 
   const personProjectFTE = {};
   _visAsgn.forEach(a => {
@@ -1010,7 +1109,7 @@ function renderTimeline() {
               if (!Array.isArray(ctx.raw)) return null;
               const [s, e] = ctx.raw;
               const fte    = ctx.dataset.fteData?.[ctx.dataIndex];
-              const cap    = personCapacity[activePeople[ctx.dataIndex]] || 1;
+              const cap    = personCapMap[activePeople[ctx.dataIndex]];
               const fteStr = fte != null
                 ? '  ' + fte.toFixed(2) + ' FTE (' + (fte / cap * 100).toFixed(0) + '% of capacity)'
                 : '';
@@ -1233,8 +1332,19 @@ function renderPersonChart(people, datasets, capMap) {
           ticks:   { font: { family: 'Open Sans', size: 13 } },
         },
       },
+      onClick: (event, elements) => {
+        if (!elements.length) return;
+        selectedPeople = [chart.data.labels[elements[0].index]];
+        activeView = 'resource-planning';
+        openDisclosureGroup('planning-toggle', 'planning-group', 'planning-chevron');
+        syncPeopleFilterCheckboxes();
+        updateViewButtons();
+        render();
+      },
     },
   });
+
+  document.getElementById('capacity-chart').style.cursor = 'pointer';
 
   queueChartResize();
   renderAccessibleChartData(people, datasets, true);
@@ -1311,11 +1421,19 @@ function renderChart(labels, datasets, horizontal) {
   renderAccessibleChartData(labels, datasets, horizontal);
 }
 
-function renderLineChart(labels, datasets) {
+function renderLineChart(labels, datasets, opts = {}) {
   if (chart) { chart.destroy(); chart = null; }
 
   const wrapper = document.getElementById('chart-wrapper');
   wrapper.style.height = '380px';
+
+  const defaultTooltipLabel = ctx => {
+    const pctStr = (ctx.parsed.y * 100).toFixed(0) + '%';
+    const raw    = ctx.dataset.rawFTE?.[ctx.dataIndex];
+    return raw != null
+      ? ' ' + ctx.dataset.label + ': ' + pctStr + ' (' + raw.toFixed(2) + ' FTE)'
+      : ' ' + ctx.dataset.label + ': ' + pctStr;
+  };
 
   chart = new Chart(document.getElementById('capacity-chart'), {
     type: 'line',
@@ -1333,13 +1451,7 @@ function renderLineChart(labels, datasets) {
         tooltip: {
           callbacks: {
             title: items => formatChartLabel(labels[items[0].dataIndex], true),
-            label: ctx => {
-              const pctStr = (ctx.parsed.y * 100).toFixed(0) + '%';
-              const raw    = ctx.dataset.rawFTE?.[ctx.dataIndex];
-              return raw != null
-                ? ' ' + ctx.dataset.label + ': ' + pctStr + ' (' + raw.toFixed(2) + ' FTE)'
-                : ' ' + ctx.dataset.label + ': ' + pctStr;
-            },
+            label: opts.tooltipLabel || defaultTooltipLabel,
           },
         },
       },
@@ -1358,7 +1470,7 @@ function renderLineChart(labels, datasets) {
             font:          { family: 'Open Sans', size: 11 },
             maxTicksLimit: 8,
           },
-          title: { display: true, text: 'Fraction of capacity', font: { family: 'Inter', size: 12 } },
+          title: { display: true, text: opts.yAxisTitle || 'Fraction of capacity', font: { family: 'Inter', size: 12 } },
         },
       },
     },
@@ -1409,12 +1521,9 @@ function renderProjectTable() {
 }
 
 function renderPeopleTable(personProject) {
-  const capMap = {};
-  rawData.people.forEach(p => { capMap[p.name] = p.fte_capacity; });
-
   const rows = rawData.people.map(p => {
     const total    = round2(Object.values(personProject[p.name] || {}).reduce((s, v) => s + v, 0));
-    const capacity = capMap[p.name] || 1;
+    const capacity = personCapMap[p.name];
     const pct      = capacity > 0 ? total / capacity : 0;
     const color    = pct > 1   ? '#EB088A'
                    : pct > 0.8 ? '#FF9E00'
@@ -1534,14 +1643,79 @@ function setText(id, text) {
   document.getElementById(id).textContent = text;  // textContent — safe
 }
 
+function applyActiveStyle(el, active) {
+  el.style.backgroundColor = active ? '#EB088A' : '';
+  el.style.color            = active ? '#ffffff' : '';
+  el.style.fontWeight       = active ? '600'     : '';
+}
+
 function updateViewButtons() {
   document.querySelectorAll('.view-btn').forEach(btn => {
     const active = btn.dataset.view === activeView;
-    btn.style.backgroundColor = active ? '#EB088A' : '';
-    btn.style.color            = active ? '#ffffff' : '';
-    btn.style.fontWeight       = active ? '600'     : '';
+    applyActiveStyle(btn, active);
     btn.setAttribute('aria-pressed', String(active));
   });
+
+  [
+    ['analysis-toggle', VIEW_CATEGORIES.breakdown],
+    ['planning-toggle', VIEW_CATEGORIES.planning],
+  ].forEach(([id, views]) => {
+    applyActiveStyle(document.getElementById(id), views.includes(activeView));
+  });
+
+  document.getElementById('people-filter-wrapper').style.display =
+    activeView === 'resource-planning' ? '' : 'none';
+}
+
+// ── People Filter ─────────────────────────────────────────────────────────────
+// Rebuilds the checkbox list from rawData.people. Safe to call on data refresh
+// because replaceChildren() removes old checkboxes and their listeners.
+// Static panel listeners (open/close, All/None) are wired once at DOMContentLoaded.
+function buildPeopleFilter() {
+  const container = document.getElementById('people-checkboxes');
+  container.replaceChildren();
+  cachedPeopleCheckboxes = [];
+
+  rawData.people.forEach(p => {
+    const label = document.createElement('label');
+    label.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:0.875rem;color:#374151;cursor:pointer;width:100%';
+
+    const cb = document.createElement('input');
+    cb.type      = 'checkbox';
+    cb.checked   = selectedPeople.includes(p.name);
+    cb.value     = p.name;
+    cb.className = 'rounded border-gray-300 text-v-magenta focus:ring-v-magenta';
+    cb.addEventListener('change', onPeopleFilterChange);
+
+    cachedPeopleCheckboxes.push(cb);
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(' ' + p.name));
+    container.appendChild(label);
+  });
+}
+
+function setAllPeopleChecked(checked) {
+  cachedPeopleCheckboxes.forEach(cb => { cb.checked = checked; });
+  onPeopleFilterChange();
+}
+
+function onPeopleFilterChange() {
+  selectedPeople = cachedPeopleCheckboxes.filter(cb => cb.checked).map(cb => cb.value);
+  updatePeopleFilterLabel();
+  render();
+}
+
+function syncPeopleFilterCheckboxes() {
+  cachedPeopleCheckboxes.forEach(cb => { cb.checked = selectedPeople.includes(cb.value); });
+  updatePeopleFilterLabel();
+}
+
+function updatePeopleFilterLabel() {
+  const n = selectedPeople.length, total = rawData.people.length;
+  const label = n === 0      ? 'Select people'
+              : n === total  ? `People (all ${total})`
+              :                `People (${n} of ${total})`;
+  document.getElementById('people-filter-label').textContent = label;  // textContent — safe
 }
 
 function closeAllMetricHelp() {

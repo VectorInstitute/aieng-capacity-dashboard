@@ -349,28 +349,11 @@
                  class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-v-magenta">
         </div>
 
-        <!-- View toggle -->
-        <span id="view-toggle-label" class="sr-only">Chart view</span>
-        <div class="view-toggle-group flex rounded-lg border border-gray-200 shadow-sm overflow-hidden text-sm"
-             role="group"
-             aria-labelledby="view-toggle-label">
-          <button type="button" data-view="trends"
-                  class="view-btn px-4 py-2 bg-white hover:bg-gray-50 transition-colors">
-            Overview
-          </button>
-          <button type="button" data-view="person"
-                  class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
-            By Person
-          </button>
-          <button type="button" data-view="project"
-                  class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
-            By Project
-          </button>
-          <button type="button" data-view="workstream"
-                  class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
-            Workstreams
-          </button>
-        </div>
+        <!-- Overview (standalone) -->
+        <button type="button" data-view="trends"
+                class="view-btn text-sm px-4 py-2 rounded-lg border border-gray-200 bg-white shadow-sm hover:bg-gray-50 transition-colors">
+          Overview
+        </button>
 
         <!-- Breakdown disclosure toggle -->
         <button type="button" id="analysis-toggle"
@@ -381,24 +364,74 @@
           <span id="analysis-chevron" aria-hidden="true" class="text-gray-400" style="font-size:0.7em;line-height:1;transition:transform 0.15s ease;display:inline-block">▼</span>
         </button>
 
-        <!-- Breakdown view toggle (hidden until expanded) -->
+        <!-- Breakdown view group (hidden until expanded) -->
         <div id="analysis-group"
              class="view-toggle-group flex rounded-lg border border-gray-200 shadow-sm overflow-hidden text-sm"
              role="group"
              aria-label="Breakdown charts"
              style="display:none">
-          <button type="button" data-view="budget"
+          <button type="button" data-view="person"
                   class="view-btn px-4 py-2 bg-white hover:bg-gray-50 transition-colors">
-            Budget
+            By Person
+          </button>
+          <button type="button" data-view="project"
+                  class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
+            By Project
           </button>
           <button type="button" data-view="roles"
                   class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
             By Role
           </button>
-          <button type="button" data-view="timeline"
+          <button type="button" data-view="workstream"
                   class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
+            Workstreams
+          </button>
+          <button type="button" data-view="budget"
+                  class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
+            Budget
+          </button>
+        </div>
+
+        <!-- Planning disclosure toggle -->
+        <button type="button" id="planning-toggle"
+                aria-expanded="false"
+                aria-controls="planning-group"
+                class="flex items-center gap-2 text-sm px-4 py-2 rounded-lg border border-gray-200 bg-white shadow-sm hover:bg-gray-50 transition-colors text-gray-600">
+          Planning
+          <span id="planning-chevron" aria-hidden="true" class="text-gray-400" style="font-size:0.7em;line-height:1;transition:transform 0.15s ease;display:inline-block">▼</span>
+        </button>
+
+        <!-- Planning view group (hidden until expanded) -->
+        <div id="planning-group"
+             class="view-toggle-group flex rounded-lg border border-gray-200 shadow-sm overflow-hidden text-sm"
+             role="group"
+             aria-label="Planning charts"
+             style="display:none">
+          <button type="button" data-view="timeline"
+                  class="view-btn px-4 py-2 bg-white hover:bg-gray-50 transition-colors">
             Timeline
           </button>
+          <button type="button" data-view="resource-planning"
+                  class="view-btn px-4 py-2 bg-white border-l border-gray-200 hover:bg-gray-50 transition-colors">
+            Resource Planning
+          </button>
+        </div>
+
+        <!-- People filter (shown only in Resource Planning view) -->
+        <div id="people-filter-wrapper" style="display:none;position:relative">
+          <button type="button" id="people-filter-btn"
+                  class="flex items-center gap-2 text-sm px-4 py-2 rounded-lg border border-gray-200 bg-white shadow-sm hover:bg-gray-50 transition-colors text-gray-600">
+            <span id="people-filter-label">People (all)</span>
+            <span aria-hidden="true" class="text-gray-400" style="font-size:0.7em;line-height:1">▼</span>
+          </button>
+          <div id="people-filter-panel"
+               style="display:none;position:absolute;left:0;top:calc(100% + 4px);z-index:1000;width:220px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.1);padding:12px">
+            <div style="display:flex;gap:12px;padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid #f3f4f6;font-size:0.75rem">
+              <button type="button" id="people-select-all" class="text-v-magenta hover:underline">All</button>
+              <button type="button" id="people-select-none" class="text-v-magenta hover:underline">None</button>
+            </div>
+            <div id="people-checkboxes" style="display:block;max-height:260px;overflow-y:auto;padding-left:4px"></div>
+          </div>
         </div>
 
         <!-- Completed toggle + Refresh (right-aligned group) -->
